@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Streamir: Audio &amp; Chat Translator for Twitch · Settings</title><link rel="stylesheet" href="settings.css"></head>
+<body>
+<main>
+  <header><p class="brand">Streamir</p><h1>Your chat, in their language.</h1><p class="muted">Translate a draft, compare the wording, then choose what goes into Twitch’s chat box.</p></header>
+  <section aria-labelledby="provider-heading">
+    <div class="section-heading"><h2 id="provider-heading">Draft reply provider</h2><span id="connection" role="status">Checking connection…</span></div>
+    <label for="provider">Use</label>
+    <select id="provider">
+      <option value="anthropic">Anthropic · Haiku 5.5 API</option>
+      <option value="openai-chatgpt">OpenAI · ChatGPT subscription</option>
+      <option value="openai-api">OpenAI · API key</option>
+      <option id="claude-option" value="claude-code" disabled hidden>Local Claude · Personal test</option>
+    </select>
+    <p id="billing" class="muted"></p>
+    <div id="api-fields">
+      <label id="key-label" for="key">Anthropic API key</label>
+      <input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your API key">
+      <div class="actions"><button id="save-key">Save key</button><button id="remove-key" class="quiet">Remove saved key</button></div>
+      <p class="small muted">Stored by the local helper. Never synced through Chrome or exposed to Twitch.</p>
+    </div>
+    <div id="chatgpt-fields" hidden>
+      <div id="account-row" hidden><label for="accounts">ChatGPT account</label><select id="accounts"></select></div>
+      <div class="actions"><button id="sign-in">Continue with ChatGPT</button><button id="add-account" class="quiet">Add another account</button><button id="sign-out" class="quiet">Sign out</button></div>
+      <p class="small muted">This development build uses the local-app sign-in flow. Review connected app limits in <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noreferrer">ChatGPT Settings</a>.</p>
+    </div>
+    <div id="model-row" hidden>
+      <label for="models">OpenAI model</label>
+      <div class="model-line"><select id="models"><option value="">Load models, then choose one</option></select><button id="load-models" class="quiet">Load models</button></div>
+      <p class="small muted">Model availability comes from your connected account.</p>
+    </div>
+  </section>
+  <section aria-labelledby="claude-heading">
+    <h2 id="claude-heading">Local Claude test</h2>
+    <p id="claude-detection" class="muted" role="status">Checking for Claude Code on this computer…</p>
+    <button id="check-claude" class="quiet">Check for Claude Code</button>
+    <div id="claude-setup" hidden>
+      <p>Connect using the Claude Code installed on this computer. This starts a local process to handle sign-in.</p>
+      <button id="generate-claude-token">Connect local Claude Code</button>
+      <div id="claude-authorization" hidden>
+        <p><a id="claude-authorize-link" target="_blank" rel="noreferrer">Open Claude authorization</a>, approve access, then paste the authorization code shown by Claude.</p>
+        <label for="claude-code">Authorization code</label>
+        <input id="claude-code" type="password" autocomplete="off" spellcheck="false" maxlength="512" placeholder="Paste the code from Claude">
+        <button id="finish-claude-login">Complete connection</button>
+      </div>
+      <button id="cancel-claude-login" class="quiet" hidden>Cancel Claude connection</button>
+      <p class="small muted">Claude Code exchanges the code locally. The resulting token is saved automatically in this extension on this computer, never synced or exposed to Twitch. Drafts use Haiku 5.5 through your installed Claude Code.</p>
+    </div>
+    <button id="remove-claude-token" class="quiet" hidden>Remove saved Claude token</button>
+  </section>
+  <section aria-labelledby="language-heading">
+    <h2 id="language-heading">Draft languages</h2>
+    <div class="columns"><div><label for="source">I write in</label><select id="source"></select></div><div><label for="target">Chat in</label><select id="target"></select></div></div>
+    <label class="check"><input id="enabled" type="checkbox" checked> Show the reply helper beside Twitch chat</label>
+    <p class="small muted">You receive three versions with back-translations. Refine or undo a change before inserting. Twitch always controls sending.</p>
+    <label class="check"><input id="assessment-enabled" type="checkbox" aria-describedby="assessment-cost"> Enable “How might this land?” checks</label>
+    <p id="assessment-cost" class="small muted">Off by default. After translations appear, ask for a separate check of one version’s tone, natural phrasing and cultural references. Each check uses additional API credits or subscription allowance from your selected provider. Nothing runs automatically.</p>
+  </section>
+  <p id="status" role="status" aria-live="polite"></p><button id="cancel" class="quiet" hidden>Cancel request</button>
+  <details>
+    <summary>Set up the local helper</summary>
+    <p>From the Streamir project folder, run this once with Node.js 22 or later, then reload the extension.</p>
+    <code id="install-command"></code>
+    <p class="small muted">The development installer supports macOS and Linux. It stores credentials on your computer and connects directly to the selected provider. Keep the project folder in place.</p>
+    <button id="refresh" class="quiet">Check connection</button>
+  </details>
+</main>
+<script type="module" src="settings.js"></script>
+</body>
+</html>

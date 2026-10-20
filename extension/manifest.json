@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Streamir: Audio & Chat Translator for Twitch",
+  "short_name": "Streamir",
+  "version": "0.1.0",
+  "description": "Hear translated audio on supported Twitch streams, follow captions, translate chat and draft replies in another language.",
+  "minimum_chrome_version": "138",
+  "permissions": ["storage", "nativeMessaging"],
+  "host_permissions": ["https://www.twitch.tv/*"],
+  "background": {"service_worker": "background.js", "type": "module"},
+  "action": {"default_popup": "popup.html", "default_title": "Streamir: Audio & Chat Translator for Twitch"},
+  "options_page": "settings.html",
+  "content_scripts": [{
+    "matches": ["https://www.twitch.tv/*"],
+    "js": ["content.js"],
+    "css": ["composer.css"],
+    "run_at": "document_idle"
+  }],
+  "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'none'; connect-src 'self'"}
+}

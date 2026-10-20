@@ -1,0 +1,13 @@
+import {build} from 'esbuild';
+import {cp, mkdir, rm} from 'node:fs/promises';
+import {fileURLToPath} from 'node:url';
+import path from 'node:path';
+const root = fileURLToPath(new URL('../', import.meta.url)), out = path.join(root, 'dist');
+await rm(out, {recursive: true, force: true});
+await mkdir(out);
+await cp(path.join(root, 'extension'), out, {recursive: true});
+const shared = {bundle: true, platform: 'browser', target: 'chrome138', minify: false};
+await build({...shared, entryPoints: [path.join(root, 'src/content.js')], outfile: path.join(out, 'content.js'), format: 'iife'});
+await build({...shared, entryPoints: {background: path.join(root, 'src/background.js'), settings: path.join(root, 'src/settings.js')}, outdir: out, format: 'esm'});
+await cp(path.join(root, 'LICENSE'), path.join(out, 'LICENSE'));
+console.log('Load dist/ as an unpacked Chrome extension.');
