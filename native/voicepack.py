@@ -349,10 +349,11 @@ def _moment(text) -> datetime:
         raise PackError('invalid timestamp') from error
 
 
-def _kek(private: X25519PrivateKey, peer: bytes) -> bytearray:
+def _kek(private: X25519PrivateKey, peer: bytes, helper_public: bytes, server_public: bytes) -> bytearray:
     shared = bytearray(private.exchange(X25519PublicKey.from_public_bytes(peer)))
     try:
-        return bytearray(HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=GRANT_INFO).derive(bytes(shared)))
+        return bytearray(HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
+                    info=GRANT_INFO + helper_public + server_public).derive(bytes(shared)))
     finally:
         shared[:] = bytes(len(shared))
 
@@ -369,10 +370,11 @@ def issue_grant(*, signing_seed: bytes, channel: str, pack_id: str, pack_sha256:
     nonce = os.urandom(12) if nonce is None else nonce
     if not isinstance(nonce, bytes) or len(nonce) != 12 or not isinstance(content_key, bytes) or len(content_key) != 32:
         raise PackError('invalid wrap input')
-    kek = _kek(ephemeral, helper_public_key)
+    server_public = ephemeral.public_key().public_bytes_raw()
+    kek = _kek(ephemeral, helper_public_key, helper_public_key, server_public)
     grant = {'v': GRANT_VERSION, 'channel': channel, 'pack_id': pack_id, 'pack_sha256': pack_sha256, 'pack_url': pack_url,
              'model': model.to_dict(), 'key_id': key_id(signer.public_key().public_bytes_raw()),
-             'helper_public_key': b64url(helper_public_key), 'server_public_key': b64url(ephemeral.public_key().public_bytes_raw()),
+             'helper_public_key': b64url(helper_public_key), 'server_public_key': b64url(server_public),
              'issued': _stamp(now), 'expires': _stamp(now + timedelta(seconds=ttl_s))}
     try:
         grant['wrap'] = {'nonce': b64url(nonce), 'data': b64url(AESGCM(bytes(kek)).encrypt(nonce, content_key, _wrap_aad(grant)))}
@@ -434,7 +436,8 @@ def _verify(message: dict, pinned_keys, helper_private: X25519PrivateKey, model:
     header = public_header(ciphertext)
     if (header['channel'], header['pack_id'], header['model']) != (grant['channel'], grant['pack_id'], grant['model']):
         raise PackError('pack header does not match grant')
-    kek = _kek(helper_private, unb64url(grant['server_public_key'], 32))
+    server_public = unb64url(grant['server_public_key'], 32)
+    kek = _kek(helper_private, server_public, helper_public, server_public)
     try:
         wrap = grant['wrap']
         return bytearray(AESGCM(bytes(kek)).decrypt(unb64url(wrap['nonce'], 12), unb64url(wrap['data'], 48), _wrap_aad(grant)))

@@ -185,3 +185,17 @@ class FixtureTests(unittest.TestCase):
                             model=vp.ModelIdentity.parse(stored['model']), ciphertext=base64.b64decode(stored['ciphertext_b64']), now=NOW)
         self.assertEqual(pack.pack_id, 'hexxyi-test-icl-1')
         self.assertEqual(vp.canonical(stored['grant_message']['grant']).decode(), stored['canonical_grant'])
+    def test_fixture_wrap_uses_spec_hkdf_info(self):
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
+        stored = json.loads((ROOT / 'tests/fixtures/voice_grant_v1.json').read_text())
+        grant = stored['grant_message']['grant']
+        helper = X25519PrivateKey.from_private_bytes(vp.unb64url(stored['helper_private_b64url'], 32))
+        helper_public, server_public = helper.public_key().public_bytes_raw(), vp.unb64url(grant['server_public_key'], 32)
+        shared = helper.exchange(X25519PublicKey.from_public_bytes(server_public))
+        kek = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b'streamir voice_grant_v1' + helper_public + server_public).derive(shared)
+        aad = vp.canonical({k: v for k, v in grant.items() if k != 'wrap'})
+        key = AESGCM(kek).decrypt(vp.unb64url(grant['wrap']['nonce'], 12), vp.unb64url(grant['wrap']['data']), aad)
+        self.assertEqual(key, vp.unb64url(stored['content_key_b64url'], 32))
