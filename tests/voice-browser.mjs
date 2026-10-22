@@ -30,7 +30,7 @@ try {
       disconnect: () => disconnect.forEach(f => f()), postMessage: m => {
         window.forwarded.push(m);
         if (m.type === 'voice_identity') {
-          setTimeout(() => window.reply({id: m.id, value: {voice: 'pack', model: {}, model_id: 'qwen3_tts-base-test-12hz', public_key: window.helperKey}}), 0);
+          setTimeout(() => window.reply({id: m.id, value: {voice: window.identityVoice ?? 'pack', model: {}, model_id: 'qwen3_tts-base-test-12hz', public_key: window.helperKey}}), 0);
         } else if (m.type === 'voice_load') { window.load = m;
         } else if (m.type === 'voice_part') {
           setTimeout(() => {
@@ -88,18 +88,39 @@ try {
     const both = await Promise.allSettled([quiet.speak({...quietJob, utterance_id: '10'}), quiet.speak({...job, utterance_id: '11'})]);
     result.concurrent = both.map(r => r.status); result.concurrentLoads = loads() - before;
     // A second no_voice after one reload rejects.
-    window.loseVoice = 2; const again = await quiet.speak({...quietJob, utterance_id: '12'}).catch(e => e.message);
+    window.loseVoice = 2; const again = await quiet.speak({...quietJob, utterance_id: '12'}).catch(e => ({message: e.message, code: e.code}));
     window.loseVoice = false;
     result.secondLoss = again;
-    // A reset while obtainVoice is pending abandons the reload.
+    // A reset while obtainVoice is pending abandons the reload and rejects the speak as cancelled.
     let release; window.gate = new Promise(resolve => { release = resolve; });
     window.loseVoice = true; const loadsBefore = loads(); const mark = window.states.length;
-    const abandoned = quiet.speak({...quietJob, utterance_id: '13'}).catch(e => e.message);
+    const abandoned = quiet.speak({...quietJob, utterance_id: '13'}).then(() => 'resolved', e => ({message: e.message, code: e.code}));
     await new Promise(resolve => setTimeout(resolve, 50));
     await quiet.reset(); release(); window.gate = null;
     result.abandoned = await abandoned; result.abandonedLoads = loads() - loadsBefore;
     result.loadedAfterReset = window.states.slice(mark).some(s => s.state === 'voice' && s.loaded);
     await quiet.close();
+    const pack = gate => async () => { await gate; return {grant: {v: 'voice_grant_v1'}, signature: 'A'.repeat(86), pack: new Uint8Array(20000).fill(3)}; };
+    // A reset while start() waits on obtainVoice rejects start() as cancelled instead of leaving it loading.
+    let open; const startGate = new Promise(resolve => { open = resolve; });
+    const pending = new LocalVoice({playback: false, onState: s => window.states.push(s), obtainVoice: pack(startGate)});
+    const startMark = window.states.length;
+    const starting = pending.start().then(() => 'resolved', e => ({message: e.message, code: e.code}));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const loadsBeforeStartReset = loads();
+    await pending.reset(); open();
+    result.startReset = await starting; result.startResetLoads = loads() - loadsBeforeStartReset;
+    result.startResetReady = window.states.slice(startMark).some(s => s.state === 'ready'); result.startResetStarted = pending.started;
+    await pending.close();
+    // A helper outside pack mode never becomes ready, so its preset voice cannot be played as the streamer's.
+    window.identityVoice = 'preset'; let asked = 0;
+    const preset = new LocalVoice({playback: false, onState: s => window.states.push(s), obtainVoice: async () => { asked++; }});
+    const presetMark = window.states.length;
+    result.presetStatus = await preset.start();
+    result.presetStates = window.states.slice(presetMark);
+    result.presetSpeak = await preset.speak({...quietJob, utterance_id: '20'}).then(() => 'resolved', e => e.message);
+    result.presetAsked = asked; result.presetStarted = preset.started;
+    window.identityVoice = undefined; await preset.close();
     return result;
   });
   assert(states.states.some(s => s.state === 'playing' && s.synchronized === false));
@@ -107,9 +128,15 @@ try {
   assert.deepEqual(states.reloaded, ['A'.repeat(43), 'B'.repeat(43), 'B'.repeat(43)]);
   assert.equal(states.partCount, 6); assert.equal(states.generatedSamples, 2400); assert.equal(states.loadSize, 20000);
   assert.deepEqual(states.concurrent, ['fulfilled', 'fulfilled']); assert.equal(states.concurrentLoads, 1);
-  assert.match(states.secondLoss, /Load the streamer voice first/);
-  assert.equal(states.abandoned, undefined); assert.equal(states.abandonedLoads, 0); assert.equal(states.loadedAfterReset, false);
+  assert.match(states.secondLoss.message, /Load the streamer voice first/); assert.equal(states.secondLoss.code, 'no_voice');
+  assert.deepEqual(states.abandoned, {message: 'Voice generation was cancelled.', code: 'cancelled'}); assert.equal(states.abandonedLoads, 0); assert.equal(states.loadedAfterReset, false);
   assert(states.states.some(s => s.state === 'voice' && s.loaded === true && s.pack_id === 'p' && s.mode === 'icl'));
+  assert.deepEqual(states.startReset, {message: 'Voice generation was cancelled.', code: 'cancelled'});
+  assert.equal(states.startResetLoads, 0); assert.equal(states.startResetReady, false); assert.equal(states.startResetStarted, false);
+  assert.deepEqual(states.presetStatus, {loaded: true, device: 'fixture'});
+  assert(states.presetStates.some(s => s.state === 'voice' && s.loaded === false && s.reason === 'not_pack' && s.voice === 'preset'));
+  assert.equal(states.presetStates.some(s => s.state === 'ready'), false);
+  assert.match(states.presetSpeak, /Enable local voice first/); assert.equal(states.presetAsked, 0); assert.equal(states.presetStarted, false);
   await page.goto(origin + '/settings.html');
   await page.setViewportSize({width: 360, height: 780});
   assert.equal(await page.locator('#extension-id').textContent(), 'a'.repeat(32));

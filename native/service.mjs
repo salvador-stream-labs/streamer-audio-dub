@@ -16,7 +16,12 @@ export class VoiceService {
   }
   receive(value) {
     let m;
-    try { m = request(value); } catch { this.send({id: value?.id, error: 'invalid'}); return; }
+    try { m = request(value); } catch {
+      this.send({id: value?.id, error: 'invalid'});
+      // A malformed part for the open transfer ends it, so its load is answered and later loads are not busy.
+      if (!this.closed && value?.type === 'voice_part' && this.transfer && value.load === this.transfer.id) this.endTransfer('invalid');
+      return;
+    }
     if (this.closed) return;
     if (this.seenRequests.has(m.id)) { this.send({id: m.id, error: 'invalid'}); return; }
     this.seenRequests.add(m.id);

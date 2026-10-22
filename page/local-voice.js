@@ -1,6 +1,9 @@
 import {VERSION, MAX_AUDIO_SECONDS, ERRORS, packParts, job as validateJob} from '../src/voice/contract.js';
 import {VoicePlayback} from './playback.js';
 
+// Rejections from the bridge carry its error code, so pages can branch on `error.code`.
+const bridgeError = value => { const code = Object.hasOwn(ERRORS, value) ? value : 'failed'; return Object.assign(new Error(ERRORS[code]), {code}); };
+
 /** Import on the viewer page; invoke start() inside its Enable local voice click. */
 export class LocalVoice {
   constructor({window: windowObject = globalThis.window, audioContext, onState = () => {}, playback = true, obtainVoice = null, ...playbackOptions} = {}) {
@@ -32,7 +35,7 @@ export class LocalVoice {
         } catch { entry.reject(new Error('Invalid local audio')); this.pending.delete(m.id); clearTimeout(entry.timer); }
       } else {
         clearTimeout(entry.timer); this.pending.delete(m.id);
-        if (m.error) entry.reject(new Error(ERRORS[m.error] ?? ERRORS.failed));
+        if (m.error) entry.reject(bridgeError(m.error));
         else if (entry.audio) {
           if (!m.value || m.value.samples !== entry.samples || m.value.chunks !== entry.parts.length ||
               m.value.sampleRate !== 24000 || !entry.samples) { entry.reject(new Error('Incomplete local audio')); return; }
@@ -48,7 +51,7 @@ export class LocalVoice {
   }
   call(type, payload = {}, id = crypto.randomUUID()) {
     if (this.closed) return Promise.reject(new Error('Local voice closed'));
-    if (this.pending.size >= 8) return Promise.reject(new Error(ERRORS.queue_full));
+    if (this.pending.size >= 8) return Promise.reject(bridgeError('queue_full'));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id); reject(new Error('Local voice did not respond. Connect the extension and check the helper.'));
@@ -62,33 +65,41 @@ export class LocalVoice {
     await this.context?.resume();
     await this.call('status');
     this.onState({state: 'loading'});
-    const generation = this.generation;
+    const current = this.current();
     const status = await this.call('warmup');
-    if (generation !== this.generation || this.closed) return;
-    if (this.obtainVoice) await this.ensureVoice();
-    if (generation !== this.generation || this.closed) return;
+    current();
+    // A helper without a pack must not become ready: its preset or reference voice is not the streamer's.
+    if (this.obtainVoice && await this.ensureVoice() === false) { current(); this.started = false; return status; }
+    current();
     this.started = true; this.onState({state: 'ready', ...status});
     return status;
   }
+  // Returns a check that rejects with `cancelled` once reset() or close() has made this generation stale.
+  current() {
+    const generation = this.generation;
+    return () => { if (generation !== this.generation || this.closed) throw bridgeError('cancelled'); };
+  }
   identity() { return this.call('voice_identity'); }
   // One load at a time: concurrent callers share it; a stale generation abandons it.
+  // Resolves true once loaded, false when the helper is not in pack mode, undefined when stale.
   ensureVoice() {
     if (this.voiceLoading) return this.voiceLoading;
     const generation = this.generation, stale = () => generation !== this.generation || this.closed;
     const attempt = async () => {
       const identity = await this.identity();
       if (stale()) return;
-      if (identity.voice !== 'pack') { this.onState({state: 'voice', loaded: false, reason: 'not_pack', voice: identity.voice}); return; }
+      if (identity.voice !== 'pack') { this.onState({state: 'voice', loaded: false, reason: 'not_pack', voice: identity.voice}); return false; }
       const voice = await this.obtainVoice(identity);
       if (stale()) return;
       await this.loadVoice(voice, generation);
+      return true;
     };
     const run = (async () => {
-      try { await attempt(); }
+      try { return await attempt(); }
       catch (error) {
         if (stale()) return;
-        if (error.message !== ERRORS.voice) throw error;
-        await attempt();
+        if (error.code !== 'voice') throw error;
+        return await attempt();
       }
     })().finally(() => { if (this.voiceLoading === run) this.voiceLoading = null; });
     return this.voiceLoading = run;
@@ -97,29 +108,30 @@ export class LocalVoice {
     const bytes = pack instanceof Uint8Array ? pack : new Uint8Array(pack);
     const sha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
     const stale = () => generation !== this.generation || this.closed;
-    if (stale()) throw new Error(ERRORS.cancelled);
+    if (stale()) throw bridgeError('cancelled');
     const parts = packParts(bytes), id = crypto.randomUUID();
     const load = this.call('voice_load', {grant, signature, size: bytes.length, sha256, parts: parts.length}, id);
     // An early load failure (busy, bad grant) must surface instead of the part errors it causes.
     const failed = new Promise((_, reject) => load.catch(reject)); failed.catch(() => {});
     for (let index = 0; index < parts.length; index++) await Promise.race([this.call('voice_part', {load: id, index, data: parts[index]}), failed]);
     const value = await load;
-    if (stale()) throw new Error(ERRORS.cancelled);
+    if (stale()) throw bridgeError('cancelled');
     this.onState({state: 'voice', loaded: true, pack_id: value.pack_id, mode: value.mode});
     return value;
   }
   async speak(value) {
     if (!this.started) throw new Error('Enable local voice first');
-    const job = validateJob(value), generation = this.generation;
+    const job = validateJob(value), current = this.current();
     let result;
     try { result = await this.call('speak', {job}); }
     catch (error) {
-      if (error.message !== ERRORS.no_voice || !this.obtainVoice) throw error;
-      await this.ensureVoice();
-      if (generation !== this.generation || this.closed) return;
+      if (error.code !== 'no_voice' || !this.obtainVoice) throw error;
+      const loaded = await this.ensureVoice();
+      current();
+      if (loaded === false) { this.started = false; throw error; }
       result = await this.call('speak', {job});
     }
-    if (generation !== this.generation || this.closed) return;
+    current();
     this.onState({state: 'generated', ...result.info});
     if (!this.playback) return result;
     this.playback.enqueue(job, result.samples);
@@ -127,7 +139,7 @@ export class LocalVoice {
   }
   invalidate() {
     this.generation++; this.voiceLoading = null; this.playback?.reset();
-    for (const entry of this.pending.values()) { clearTimeout(entry.timer); entry.reject(new Error(ERRORS.cancelled)); }
+    for (const entry of this.pending.values()) { clearTimeout(entry.timer); entry.reject(bridgeError('cancelled')); }
     this.pending.clear();
   }
   // Mandatory on every hello, reconnect, seek, ad, pause or channel change.

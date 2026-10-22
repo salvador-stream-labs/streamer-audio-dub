@@ -150,3 +150,15 @@ test('load waits behind generation, and worker voice errors reach the page uncha
   w[0].respond({type: 'error', id: 'one', error: 'no_voice'}); assert.equal(o.at(-1).error, 'no_voice');
   transfer(s, new Uint8Array(4), 'load2'); w[0].respond({type: 'error', id: 'load2', error: 'voice'}); assert.equal(o.at(-1).error, 'voice');
 });
+test('a malformed part for the open transfer closes it and answers the load', t => {
+  const {service: s, workers: w, output: o} = fixture(); t.after(() => s.close());
+  s.receive(message('warm', 'warmup')); w[0].respond({type: 'ready', device: 'metal'});
+  const bytes = new Uint8Array(VOICE_PART_BYTES + 5).fill(1);
+  s.receive({id: 'load', v: VERSION, type: 'voice_load', grant, signature: 'A'.repeat(86), size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), parts: 2});
+  s.receive({id: 'stray', v: VERSION, type: 'voice_part', load: 'other', index: 0, data: 'A'.repeat(VOICE_PART_CHARS + 4)});
+  assert.deepEqual(o.at(-1), {id: 'stray', error: 'invalid'}); assert.equal(s.transfer?.id, 'load'); // Another load's malformed part is ignored.
+  s.receive({id: 'huge', v: VERSION, type: 'voice_part', load: 'load', index: 0, data: 'A'.repeat(VOICE_PART_CHARS + 4)});
+  assert.deepEqual(o.slice(-2), [{id: 'huge', error: 'invalid'}, {id: 'load', error: 'invalid'}]); assert.equal(s.transfer, null);
+  transfer(s, bytes, 'next'); assert.deepEqual(o.find(r => r.id === 'next-1').value, {index: 1});
+  assert.equal(w[0].commands.at(-1).type, 'load_voice');
+});

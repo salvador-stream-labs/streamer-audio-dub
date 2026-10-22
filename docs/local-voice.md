@@ -34,7 +34,15 @@ Copy the built `dist/viewer-local-voice.js` into the viewer's assets. Instantiat
 
 Call `await voice.start()` directly from the page's enable-local-voice click.
 It resumes audio while user activation is available, checks the extension and
-warms the model. Catch errors and show the helper setup instructions.
+warms the model. Catch errors and show the helper setup instructions. If `reset()`
+or `close()` runs while `start()` is still warming up or loading the voice, `start()`
+rejects with `code: "cancelled"` and emits no `ready`; call it again to enable voice.
+
+Rejections that come from the bridge carry `error.code`, the bridge error code
+(`setup`, `busy`, `queue_full`, `expired`, `cancelled`, `timeout`, `invalid`, `failed`,
+`no_voice` or `voice`; an unknown code becomes `failed`), and keep the readable
+`error.message`. Branch on `error.code`, not the message. Local checks such as
+"Enable local voice first", a response timeout or malformed audio have no code.
 
 Call `await voice.speak(job)` for each complete translated utterance plus its
 matching analysis. It resolves with generation metrics after the complete audio
@@ -122,16 +130,24 @@ Adapter options for pack mode:
 
 `voice.identity()` and `voice.loadVoice({grant, signature, pack})` are also exposed.
 Reload behaviour: `start()` loads the voice after warmup when `obtainVoice` is set.
+If the helper reports a `voice` other than `pack`, the adapter emits
+`{state: "voice", loaded: false, reason: "not_pack", voice}`, does not call `obtainVoice`,
+emits no `ready` and stays disabled: `start()` resolves with the warmup status so the page
+can show install guidance, and `speak()` keeps rejecting with "Enable local voice first".
+A preset or development reference voice is never played as the streamer's.
 Only one load is in flight at a time and concurrent callers share it. Each attempt
 reads the identity, calls `obtainVoice`, then `loadVoice`. If a `speak` fails with
 `no_voice`, the adapter runs one load and replays the request once. If a load fails
 with `voice`, it obtains a new grant and tries once more, then reports the error.
-`reset()` or `close()` during a load makes that load stale and it is discarded. A
+`reset()` or `close()` during a load makes that load stale: it is discarded and the
+waiting `start()` or `speak()` rejects with `code: "cancelled"`. A
 worker restart (a timeout, or a reset during generation) discards the loaded voice and
 requires a new grant; grants are bound to the helper's per-process key and are not reusable.
 
 Threat model. The pack is decrypted only in the helper's memory and the voice is not
-stored on your computer. A determined viewer with a debugger could still extract the
+stored on your computer. Wiping key and plaintext buffers after use is best effort:
+Python's `AESGCM.decrypt` returns immutable `bytes` that cannot be overwritten, so only
+the helper's mutable `bytearray` copies are zeroed. A determined viewer with a debugger could still extract the
 conditioning while the helper runs. Revocation stops new sessions from receiving a
 grant; it does not recall a voice already loaded.
 
