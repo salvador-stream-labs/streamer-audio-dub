@@ -1,0 +1,68 @@
+[
+  {
+    "type": "hello",
+    "channel": "demo",
+    "clock_epoch": "2026-10-22T00:00:00Z",
+    "lang": "en",
+    "source_language": "ru",
+    "speakers": [],
+    "v": "feed_v3",
+    "analysis_session": "fixture-analysis-session"
+  },
+  {
+    "type": "caption",
+    "seq": 1,
+    "t_start": 0,
+    "t_end": 2,
+    "text": "Neutral first.",
+    "lang": "en",
+    "speaker_id": null,
+    "v": "feed_v3"
+  },
+  {
+    "type": "prosody",
+    "seq": 2,
+    "analysis": {
+      "version": "source_prosody_v1",
+      "session": "fixture-analysis-session",
+      "utterance_id": "2",
+      "audio_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sample_count": 32000,
+      "source_kind": "stream_mix",
+      "extractor": {
+        "id": "studio-python-v1",
+        "revision": "0000000000000000000000000000000000000000000000000000000000000000",
+        "config_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "status": "ok",
+      "summary": {
+        "version": "prosody_v1",
+        "implementation": "studio-python-v1",
+        "values": {
+          "f0_median_st": 40,
+          "f0_iqr_st": 3,
+          "energy_dbfs": -20,
+          "energy_sd_db": 2,
+          "rate": 3,
+          "pause_ratio": 0.1,
+          "voicing": 0.8,
+          "duration_s": 2
+        }
+      },
+      "contour": null,
+      "audio_ref": null,
+      "analysis_ms": 12
+    },
+    "v": "feed_v3"
+  },
+  {
+    "type": "caption",
+    "seq": 2,
+    "t_start": 2,
+    "t_end": 4,
+    "text": "Thank you for joining us.",
+    "lang": "en",
+    "speaker_id": null,
+    "v": "feed_v3"
+  }
+]

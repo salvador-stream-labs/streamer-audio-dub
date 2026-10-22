@@ -5,6 +5,8 @@ import assert from 'node:assert/strict';
 const files = new Map([
   ['/content.js', ['dist/content.js', 'text/javascript']],
   ['/viewer-local-voice.js', ['dist/viewer-local-voice.js', 'text/javascript']],
+  ['/viewer-prosody-feed.js', ['dist/viewer-prosody-feed.js', 'text/javascript']],
+  ['/prosody-fixture.json', ['tests/fixtures/prosody-feed-v3.json', 'application/json']],
   ['/settings.html', ['dist/settings.html', 'text/html']],
   ['/settings.js', ['dist/settings.js', 'text/javascript']],
   ['/settings.css', ['dist/settings.css', 'text/css']],
@@ -70,6 +72,14 @@ try {
     window.reply({id: held.id, value: {sampleRate: 24000, samples: 1, chunks: 1}});
     const result = {states, cancellation: await window.cancelled, queued: voice.playback.queue.length,
       translatedText: window.forwarded.find(m => m.type === 'speak').job.text};
+    const {ProsodyFeed} = await import('/viewer-prosody-feed.js');
+    const feed = new ProsodyFeed({voice, channel: 'demo'});
+    const frames = await (await fetch('/prosody-fixture.json')).json();
+    const start = window.forwarded.length;
+    for (const frame of frames) await feed.accept(JSON.stringify(frame));
+    const jobs = window.forwarded.slice(start).filter(m => m.type === 'speak').map(m => m.job);
+    result.prosodyJobs = jobs;
+    result.prosodyPlaying = voice.playback.active !== null || voice.playback.queue.length > 0;
     await voice.close();
     const obtained = [];
     const quiet = new LocalVoice({playback: false, onState: s => window.states.push(s), obtainVoice: async identity => { await window.gate; obtained.push(identity.public_key); return {grant: {v: 'voice_grant_v1'}, signature: 'A'.repeat(86), pack: new Uint8Array(20000).fill(3)}; }});
@@ -125,6 +135,9 @@ try {
   });
   assert(states.states.some(s => s.state === 'playing' && s.synchronized === false));
   assert.match(states.cancellation, /cancelled/); assert.equal(states.queued, 0); assert.equal(states.translatedText, 'Thank you.');
+  assert.equal(states.prosodyJobs.length, 2); assert.equal(states.prosodyJobs[0].prosody, null);
+  assert.equal(states.prosodyJobs[0].session, states.prosodyJobs[1].session);
+  assert.equal(states.prosodyJobs[1].prosody.version, 'source_prosody_v1'); assert(states.prosodyPlaying);
   assert.deepEqual(states.reloaded, ['A'.repeat(43), 'B'.repeat(43), 'B'.repeat(43)]);
   assert.equal(states.partCount, 6); assert.equal(states.generatedSamples, 2400); assert.equal(states.loadSize, 20000);
   assert.deepEqual(states.concurrent, ['fulfilled', 'fulfilled']); assert.equal(states.concurrentLoads, 1);
@@ -143,7 +156,7 @@ try {
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   assert.equal(await page.locator('input[type=password]').count(), 0);
   assert.deepEqual(errors, []);
-  console.log('Browser checks passed: text/PCM bridge, explicit delayed playback, reset suppression, setup page at 360px.');
+  console.log('Browser checks passed: prosody feed matching, neutral-first identity, text/PCM bridge, playback, reset suppression, setup page at 360px.');
 } finally {
   await browser?.close(); await new Promise(resolve => server.close(resolve));
 }

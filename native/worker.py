@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 import voicepack
+from prosody import shift_pitch
 from vendor.runtime_contract import Analysis
 from voicepack import MAX_CIPHERTEXT, ModelIdentity, PackError, b64url, unb64url
 
@@ -118,6 +119,28 @@ class Steering:
     """Bounded, session-relative summary hints, not a reconstruction of source contour."""
     def __init__(self):
         self.history = []
+
+    def pitch(self, analysis, cap=1):
+        if not math.isfinite(cap) or not 0 <= cap <= 1:
+            raise ValueError('Invalid pitch cap')
+        count = len(self.history)
+        result = {'mechanism': 'summary_pitch_v1', 'requestedSemitones': 0,
+                  'appliedSemitones': 0, 'baselineCount': count, 'tempo': 1, 'gainDb': 0,
+                  'reason': 'missing_analysis', 'processingSeconds': 0}
+        if analysis is None:
+            return result
+        if analysis.status != 'ok':
+            result['reason'] = analysis.status
+            return result
+        v = analysis.summary.values
+        if count < 5:
+            result['reason'] = 'warming_up'
+        else:
+            baseline = statistics.median(row.f0_median_st for row in self.history)
+            shift = max(0., min(cap, v.f0_median_st - baseline))
+            result.update(requestedSemitones=shift, reason='shifted' if shift else 'no_upward_shift')
+        self.history = (self.history + [v])[-30:]
+        return result
 
     def instruction(self, analysis):
         if analysis is None or analysis.status != 'ok':
@@ -241,7 +264,9 @@ class Engine:
             raise Failure('no_voice')
         analysis = validate_job(job)
         instruction = self.steering.instruction(analysis) if self.can_instruct else ''
+        expression = self.steering.pitch(analysis, self.config.get('pitchCapSemitones', 1)) if self.config['mode'] == 'base' else None
         cfg, started, count, blocks = self.config, time.monotonic(), 0, 0
+        collected = []
         # Bound text-to-audio expansion and generation even if the model never emits EOS.
         tokens = min(540, max(120, len(job['text']) * 3))
         text = ' '.join(job['text'].split())
@@ -250,11 +275,17 @@ class Engine:
             a = self.np.asarray(audio, dtype=self.np.float32).reshape(-1)
             if rate != RATE or not a.size or not self.np.isfinite(a).all() or count + a.size > RATE * MAX_SECONDS:
                 raise ValueError('Invalid or excessive generated audio')
+            if expression is not None:
+                collected.append(a.copy())
+            else:
+                send_pcm(a)
+            count += a.size
+        def send_pcm(a):
+            nonlocal blocks
             for start in range(0, a.size, 12000):
                 part = (self.np.clip(a[start:start+12000], -1, 1) * 32767).astype('<i2').tobytes()
                 emit({'type': 'pcm', 'index': blocks, 'sampleRate': RATE, 'data': base64.b64encode(part).decode()})
                 blocks += 1
-            count += a.size
         if cfg['backend'] == 'mlx':
             args = dict(text=text, lang_code=LANGUAGES[job['language']].lower(), max_tokens=tokens,
                         temperature=.7, stream=True, streaming_interval=.5, verbose=False)
@@ -275,9 +306,22 @@ class Engine:
             publish(wavs[0], rate)
         if not count or count / RATE >= tokens / 12 * .98:
             raise ValueError('No audio or possible truncated speech')
+        if expression is not None:
+            audio = self.np.concatenate(collected)
+            processing = time.monotonic()
+            if expression['requestedSemitones']:
+                try:
+                    audio = shift_pitch(audio, expression['requestedSemitones'], RATE)
+                    expression['appliedSemitones'] = expression['requestedSemitones']
+                except Exception:
+                    # The unmodified utterance is still available; never lose speech to DSP.
+                    expression['reason'] = 'processing_failed'
+            expression['processingSeconds'] = time.monotonic() - processing
+            send_pcm(audio)
         return {'sampleRate': RATE, 'samples': int(count), 'chunks': blocks, 'duration': count / RATE,
                 'generationSeconds': time.monotonic() - started, 'device': self.device,
-                'steering': 'summary_instruction' if instruction else 'neutral',
+                'steering': 'summary_pitch' if expression and expression['appliedSemitones'] else 'summary_instruction' if instruction else 'neutral',
+                **({'prosody': expression} if expression is not None else {}),
                 'unsupported': ['pitch_contour', 'word_emphasis', 'aligned_pauses', 'exact_duration'] +
                                ([] if self.can_instruct else ['summary_instruction'])}
 

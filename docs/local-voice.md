@@ -67,12 +67,12 @@ A job has exactly these fields:
 `session` and `utterance_id`. Its schema is already defined by the server/Studio
 internal runtime contract. A byte-identical copy and SHA-256 pin are stored in
 `native/vendor/`; the worker uses its actual `Analysis.parse`, not guessed
-field names. **The server does not yet publish this object to viewers.** The new
-wire adapter must specify how source session identity and local hello generation
-are represented without rewriting the authoritative analysis identity. This
-boundary's explicit `reset()` also invalidates local generations even when the
-source session/epoch repeats. Until that adapter is agreed, use the authoritative
-analysis session unchanged and reset on every hello.
+field names. Opt in with the exact query `v=feed_v3&lang=en&prosody=1` (also
+accepted for `de` where analysis runs). The greeting adds `analysis_session`;
+use it for all jobs, including neutral jobs before analysis arrives. Extra
+events contain exactly `type: "prosody"`, `v: "feed_v3"`, `seq`, and the unchanged
+object in `analysis`. Its session must match the greeting and its utterance ID
+must equal `String(seq)`. Every hello resets local generations even if its epoch repeats.
 
 Limits: text ≤1,000 UTF-16 code units, source span 1/16,000–30 seconds, known Qwen
 language code, analysis payload ≤8,192 code units. Larger server utterances need
@@ -160,8 +160,9 @@ audio. Duplicate utterances cannot be replayed within a generation. The model
 stays resident between utterances. Reset during generation kills that worker;
 reset while idle keeps the model and clears its prosody history. Disconnect kills it.
 
-MLX emits chunks as it generates. PyTorch's high-level API returns buffered audio,
-which is split into transport chunks. The page currently waits for successful
+MLX generates chunks; PyTorch returns buffered audio. Base and pack modes collect
+the bounded utterance for pitch processing, then emit transport chunks.
+CustomVoice retains incremental MLX transport. The page waits for successful
 completion before playback, so incomplete or runaway output is never played.
 This is buffered sentence playback, not a low-latency streaming-playback claim.
 
@@ -186,11 +187,50 @@ After five utterances, pitch, energy and rate are compared to the last thirty
 utterances in that session. Pitch hints only request an upward change. These are
 requested controls, not a measured guarantee that Qwen followed them.
 
-Base mode caches a fixed reference (and on PyTorch its clone prompt), preserving
-that reference voice. It reports summary instructions as unsupported. Applying
-server intonation while retaining a specific streamer voice needs a qualified
-reference bank/live-reference adapter or calibrated post-processing. The current
-implementation does not claim to solve that missing part.
+Base reference and pack modes apply experimental whole-utterance upward pitch
+processing. The first five valid voiced observations remain neutral. Subsequent
+shifts are `f0_median_st` minus the median of the previous thirty valid observations,
+clamped to zero through the operator's `pitchCapSemitones` (default 1, allowed 0–1).
+Missing, failed and unvoiced analysis neither shifts speech nor enters the baseline.
+The service deduplicates utterances; reset clears history. Tempo remains 1 and gain
+transfer 0 dB. CustomVoice's existing model hints are unchanged.
+
+The NumPy/SciPy waveform-aligned overlap-add and polyphase-resampling path preserves sample count
+and bypasses neutral speech exactly. Processing errors return the original audio.
+It aligns short speech waveforms before crossfading, replacing the original
+phase vocoder after the owner reported an echo-like sound. The revised +1 sample
+was approved in listening on 22 October. +3 was rejected and is no longer accepted
+in configuration or DSP. This is separate from the server's varying Praat curve.
+Formants also move. Peak protection may attenuate processed audio.
+Results report `prosody.requestedSemitones`, `appliedSemitones`, `baselineCount`,
+`processingSeconds`, and `reason`: `warming_up`, `missing_analysis`, an analysis
+status, `no_upward_shift`, `shifted`, or `processing_failed`. Applied means the DSP
+ran with that setting, not a measured guarantee for every frame.
+
+Generate identical local Qwen takes at 0/+1 with
+`<helper-python> scripts/prosody-audition.py /path/voice-config.json /local/output`.
+Compare identity, consonants, naturalness and phrase endings before choosing a rollout cap.
+
+### Opted-in page adapter
+
+`page/prosody-feed.js` builds to `dist/viewer-prosody-feed.js`. After enabling
+`LocalVoice`, construct `new ProsodyFeed({voice, channel, language, onState})`,
+connect to `feed.url(serverWebSocketBase)`, and pass each frame to
+`Promise.resolve().then(() => feed.accept(event.data)).catch(onError)`.
+Call `feed.reset()` on disconnect and every reset boundary above. The production
+page still needs this wiring and a verified playback-clock mapping; its opted-in
+caption parser must also recognize the new greeting and prosody event.
+
+The adapter holds at most 64 analyses, rejects matches older than 30 seconds,
+and dispatches captions with the matching analysis or null without waiting.
+All prosody stays in bounded memory: no S3, local storage or analysis recordings.
+It ignores server `say` events; the page must disable its other speech player
+while local voice is enabled. For multi-speaker feeds supply `speakerId`; without
+a selection it skips speech rather than mixing speakers into one baseline.
+Reset/recreate the adapter when changing that selection. The first pilot uses
+enrolled single-speaker channels with existing analysis, not stock-voice channels.
+The Chromium integration test covers the adapter, bridge and playback using the
+same wire fixture as the server, including neutral-first identity and resets.
 
 Both modes explicitly report pitch-contour, word-emphasis, aligned pauses and
 exact duration fitting as unsupported. Existing server analysis exposes summary

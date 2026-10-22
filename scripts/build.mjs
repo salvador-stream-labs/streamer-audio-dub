@@ -10,5 +10,6 @@ const shared = {bundle: true, platform: 'browser', target: 'chrome138', minify: 
 await build({...shared, entryPoints: [path.join(root, 'src/content.js')], outfile: path.join(out, 'content.js'), format: 'iife'});
 await build({...shared, entryPoints: {background: path.join(root, 'src/background.js'), settings: path.join(root, 'src/settings.js')}, outdir: out, format: 'esm'});
 await build({...shared, entryPoints: [path.join(root, 'page/local-voice.js')], outfile: path.join(out, 'viewer-local-voice.js'), format: 'esm'});
+await build({...shared, entryPoints: [path.join(root, 'page/prosody-feed.js')], outfile: path.join(out, 'viewer-prosody-feed.js'), format: 'esm'});
 await cp(path.join(root, 'LICENSE'), path.join(out, 'LICENSE'));
 console.log('Load dist/ as an unpacked Chrome extension.');
