@@ -35,6 +35,13 @@ test('model configuration cannot select remote models or page-controlled executa
   assert.equal(config(c).speaker, 'Ryan');
   for (const patch of [{python: 'python'}, {modelPath: 'Qwen/model'}, {device: 'cuda'}, {mode: 'base'}, {speaker: '../file'}]) assert.throws(() => config({...c, ...patch}));
 });
+test('pack mode pins one to four server keys and carries no reference files', () => {
+  const base = {python: '/python', modelPath: '/model', backend: 'mlx', device: 'metal', mode: 'base'};
+  const key = 'A'.repeat(43);
+  assert.deepEqual(config({...base, voice: 'pack', voicePublicKeys: [key]}), {...base, voice: 'pack', voicePublicKeys: [key]});
+  assert.equal(config({...base, referenceAudio: '/ref.wav', referenceText: 'hi'}).voice, 'reference');
+  for (const patch of [{voicePublicKeys: []}, {voicePublicKeys: [key, key, key, key, key]}, {voicePublicKeys: ['A'.repeat(42)]}, {voicePublicKeys: [key], referenceAudio: '/ref.wav'}, {voice: 'preset'}]) assert.throws(() => config({...base, voice: 'pack', ...patch}));
+});
 test('Chrome framing handles fragmented UTF-8 and rejects oversized frames', () => {
   const out = [], accept = decoder(m => out.push(m)), bytes = frame({text: 'Привет'});
   for (const b of bytes) accept(Buffer.from([b]));
