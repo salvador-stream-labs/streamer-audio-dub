@@ -1,185 +1,144 @@
-# Streamir: Audio & Chat Translator for Twitch
+# Streamir: Local Qwen Voice
 
-Chrome desktop viewer for Streamir's server-generated translated audio and captions.
-This is the server-backed successor to Lexxyicon. The initial test channel is `hexxyi`.
+A Chrome extension and local helper that generate speech on the viewer's computer.
+The Streamir web page owns the embedded player, captions, chat translation and reply
+composition. This extension does not translate text, render captions, inspect
+Twitch chat or connect to an LLM subscription.
 
-Speech translation and voice generation belong to the server. Incoming chat stays
-on the viewer's computer and uses Chrome's built-in Translator. The viewer's draft
-reply helper is retained as a product requirement.
+**Development integration, not yet connected to the live viewer.** The user changed
+this scope on 21 October 2026. The requested coordination session,
+`streamir-server-2010`, could not be contacted because its local session connector
+was offline. Its saved conversation and current repository were inspected. The
+current server still publishes `feed_v1`, which has no intonation event. The new
+page/server adapter must be agreed before enabling the live connection. See
+[the local voice interface and outstanding server work](docs/local-voice.md).
 
-## Current state
+## What works
 
-The draft reply composer is a loadable development extension. Server audio playback
-and incoming chat translation remain separate, unfinished integration work.
+- Explicitly connect one viewer tab through the extension action. No persistent
+  host permissions, automatic Twitch injection or local listening HTTP server.
+- A Chrome native-messaging helper runs a resident Qwen process. Model weights
+  remain on the user's computer; runtime downloads are disabled.
+- MLX/Metal on Apple Silicon, or PyTorch/CUDA on Linux with an NVIDIA GPU. Explicit
+  CPU mode is available. GPU selection is reported; CPU fallback is never labelled GPU.
+- Qwen CustomVoice 1.7B accepts conservative summary-based delivery instructions.
+  Qwen Base supports a local reference voice. Its lack of instruction steering is
+  reported explicitly, rather than silently treating it as supported.
+- Bounded generation, deduplication, cancellation, stale-result suppression, PCM
+  delivery, and page-side audio scheduling. There is no overlapping speech backlog.
+- A page adapter that waits for a source-to-playback clock mapping. The page can
+  separately offer an explicit `as-ready` mode for delayed, unsynchronized audio.
 
-The composer supports:
+The existing provider/OAuth/Claude helper, chat composer, caption overlay, direct
+viewer feed client and old fingerprint scheduler have been removed. The old
+extension credential is removed from Chrome local storage on startup. An old
+`app.streamir.composer` registration or credentials already installed on disk are
+not used or modified by this helper.
 
-- Personal testing with an existing local Claude Code executable. Settings detect
-  it before showing token generation and the local Claude provider.
-- Anthropic's direct Messages API with `claude-haiku-5-5`.
-- OpenAI's direct Responses API with an API key.
-- OpenAI's documented ChatGPT plan OAuth flow for this locally hosted development
-  app, with account selection, PKCE, validated ID tokens, refresh, and sign-out.
-- Three translated versions with back-translations, refinement, undo, and insertion
-  into Twitch's chat box. The viewer always submits the message.
-- Optional **How might this land?** checks of a chosen version's tone, natural
-  phrasing and cultural references. Enable the checkbox in Settings; it is off
-  by default. Each explicitly requested check uses additional provider credits
-  or subscription allowance. Translations appear first; reopening advice is free.
-- A warm Haiku 5.5 / low-effort Claude Code process, with `/clear` after two minutes
-  idle, and equivalent bounded context reuse for the direct APIs. Sessions also
-  reset at 12 turns or 32,768 context characters and on tab/channel/account changes.
-  Prompt caching is enabled where supported; no warm-up inference is generated.
+## Install for development
 
-API keys and ChatGPT OAuth tokens currently live in owner-only local files under
-`~/.config/streamir-composer/<extension-id>/`, managed by the native helper.
-The helper calls the providers directly or, when selected for personal testing,
-runs the detected local Claude Code executable. It does not run speech models.
-It supports macOS and Linux.
-
-The Claude test token is stored in the extension's local storage, restricted to
-trusted extension contexts. Twitch content scripts receive only sanitized
-preferences. The token is never synced and is passed to the local helper only for
-a Claude draft request; the helper does not persist it. No hosted Claude runtime
-is involved. See [provider authentication](docs/composer-auth.md).
-
-## Load the composer
-
-Use Node.js 22 or later:
+Requires Node.js 22+, Chrome 138+, Python 3.11, and FFmpeg for reference-audio loading.
+The installer supports macOS and
+Linux; a Windows native-host installer has not been implemented. Model downloads
+are several gigabytes. No model is downloaded by loading the extension.
 
 ```sh
 npm ci
 npm run build
 ```
 
-1. Open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and
-   select this project's `dist/` directory.
-2. Open Streamir's **Chat connections & settings**. Under **Set up the local
-   helper**, copy the command containing your actual extension ID.
-3. Run that command from this project folder:
+Load `dist/` using **Load unpacked** at `chrome://extensions`, then open the
+extension's **Install & setup** page for its ID.
 
-   ```sh
-   node native/install.mjs YOUR_CHROME_EXTENSION_ID
-   ```
+For Apple Silicon:
 
-4. Reload the extension and open its settings. Save an Anthropic/OpenAI API key,
-   choose **Continue with ChatGPT**, or use **Local Claude test** below. For OpenAI,
-   load the account's models and select one. Configure the draft and chat languages.
-5. Reload `https://www.twitch.tv/hexxyi`. Draft a message in the reply helper,
-   compare the versions, and choose **Use this version**. Review and send it from
-   Twitch's native chat box.
+```sh
+python3.11 -m venv .venv-qwen
+.venv-qwen/bin/python -m pip install -r native/requirements-mlx.txt
+.venv-qwen/bin/hf download mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit --local-dir models/qwen
+```
 
-Keep the project folder and Node installation in place because the native host's
-launcher references them. Re-run helper registration if either moves.
+For NVIDIA/Linux, create the same environment and install a CUDA-enabled PyTorch
+build appropriate to the installed driver using the [PyTorch installer](https://pytorch.org/get-started/locally/), then:
 
-### Test with your installed Claude Code
+```sh
+.venv-qwen/bin/python -m pip install -r native/requirements-torch.txt
+.venv-qwen/bin/hf download Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice --local-dir models/qwen
+```
 
-1. Open settings and choose **Check for Claude Code**. The helper checks common
-   installation locations and the PATH captured during helper registration.
-   Re-run the installer and reload the extension if your shell's PATH has changed.
-2. When the executable is found, choose **Connect local Claude Code**. The helper
-   runs `claude setup-token` in a private terminal session on this computer.
-3. Follow **Open Claude authorization**, approve access, then paste Claude's
-   authorization code into settings and choose **Complete connection**. Keep the
-   settings tab open during authorization. Local Claude Code exchanges the code,
-   and the extension saves the resulting token automatically and selects local
-   Claude. You do not operate Terminal or copy the final token. Save means stored,
-   not inference authentication verified.
-4. Request draft versions on Twitch to test Haiku 5.5. **Remove saved Claude token**
-   deletes the extension's copy. An expired token must be regenerated.
+For repeatable deployment, supply the chosen model commit with `hf download --revision`
+and record that revision with the installation. The development instructions above
+use the current model release; dependency pins are in `native/requirements-*.txt`.
 
-Token generation is hidden when no executable is found. Detection is repeated
-before launch of a new process. No installation or token generation
-starts automatically. **Cancel Claude connection**, closing settings, or the
-ten-minute expiry terminates the local session and removes its temporary config.
-Chrome's native-messaging permission is described as “Communicate with cooperating
-native applications”; no Terminal-app automation is used.
+Create the ignored `voice-config.json`, replacing paths with absolute paths:
 
-The ChatGPT flow uses the documented local-app dynamic registration entry point.
-It must not be advertised as approved subscription access for a paid or remotely
-hosted release. That distribution needs OpenAI's separate commercial arrangement.
-Anthropic API mode uses an API key.
-See [provider authentication](docs/composer-auth.md) for source links.
+```json
+{
+  "python": "/absolute/path/to/.venv-qwen/bin/python",
+  "modelPath": "/absolute/path/to/models/qwen",
+  "backend": "mlx",
+  "device": "metal",
+  "mode": "custom_voice",
+  "speaker": "Ryan"
+}
+```
 
-## Audio integration core
+For NVIDIA use `backend: "torch"`, `device: "cuda"`. PyTorch's `auto` selects CUDA
+when available and otherwise CPU; `cpu` explicitly selects CPU. MLX requires Metal.
 
-- `src/feed/protocol.js` validates `hello`, `caption`, `say` and unchanged `utt_v1`
-  fingerprints, rejecting missing/extra fields and enforcing consumer limits.
-- `src/feed/client.js` discovers the current English feed from its actual `hello`,
-  handles reconnection, and delivers every new `hello` as a synchronization reset.
-- `src/feed/session.js` delivers captions before audio decoding, bounds decode
-  work, and rejects old decode/matcher results after timeline resets.
-- `src/audio/scheduler.js` times captions independently over the original source
-  span. Speech has its own five-second freshness limit, rechecked after decode
-  and queueing; interrupted speech never restarts.
-- `tests/` exercises the agreed contract's timing examples, strict parsing,
-  interleaving/deduplication, resets, visibility, failure and overflow paths.
+To use a prepared streamer reference voice, download the matching **Base** model
+instead, set `mode: "base"`, and replace `speaker` with `referenceAudio` (an absolute
+path to a 3–12 second mono PCM16 WAV) and `referenceText` (its transcript). Use a
+model directory distinct from the CustomVoice directory. Base mode currently uses
+that fixed reference and reports summary instruction steering as unsupported. A
+streamer voice plus measured intonation needs further reference/prompt integration;
+it is not achieved just by sending metadata to Base. Qwen documents the different
+[CustomVoice and Base interfaces](https://github.com/QwenLM/Qwen3-TTS).
 
-These modules are not yet connected to a browser audio player, matcher or caption
-overlay. The canonical agreement is the sibling server's
-[viewer feed v1 contract](../streamir-server/docs/contracts/viewer-feed-v1.md).
+Test the model before registering it:
 
-## Validation
+```sh
+node native/smoke.mjs voice-config.json /tmp/streamir-voice.wav
+```
+
+Register the helper using the extension ID shown on its setup page:
+
+```sh
+node native/install.mjs YOUR_CHROME_EXTENSION_ID /absolute/path/to/voice-config.json
+```
+
+The installer writes a per-user `app.streamir.qwen` native-host registration and a
+launcher under `~/.config/streamir-qwen/<extension-id>/`. It does not install a
+background daemon. The model starts when the connected page requests warmup or
+speech and exits when the native connection closes. Keep this checkout and its
+Python environment in place. `STREAMIR_INSTALL_ROOT` redirects registration into
+a staging directory for tests.
+
+Once the page integration exists, open the viewer, click **Connect this viewer**
+in the extension, then enable local voice in the page. The connection grants that
+page access to local speech synthesis until it is disconnected or closed.
+
+## Page integration and verification
+
+`dist/viewer-local-voice.js` exports `LocalVoice` for the viewer page to import.
+Its public interface is documented in [docs/local-voice.md](docs/local-voice.md).
+The page owns its AudioContext, playback-clock mapping and original audio volume.
+The extension never assumes that message arrival time matches the Twitch picture.
 
 ```sh
 npm test
+npm run test:python
 npm run build
 npm run test:browser
 ```
 
-On 20 October 2026, the automated suite and extension build passed. Tests
-cover the provider request contracts, malformed output, interrupted streams, OAuth
-PKCE/state/signature/identity checks, token rotation, credential permissions,
-extension message authorization, a staged native-helper install and status exchange,
-and the audio feed/scheduling core. Claude tests cover executable detection and
-removal, conditional setup controls, trusted extension storage, credential message
-boundaries, fixture CLI output, cancellation, and temporary-file cleanup. Login
-tests run the real macOS PTY wrapper against a harmless executable fixture, covering
-URL/code/token exchange, rejected codes, expiry, session ownership, and ANSI rendering.
-Warm composer tests also cover process reuse, confirmed `/clear`, idle/size/turn
-limits, tab/account/model isolation, cache parameters, cancellation and cleanup.
+The tests cover native framing, request bounds, model lifecycle, queue expiry,
+reset/cancellation, playback timing, browser message delivery and responsive setup.
+The browser test uses a simulated native helper. It does not establish live Twitch
+sync or CUDA performance.
 
-The actual local executable was detected at `/Users/samdavey/.local/bin/claude`.
-The real CLI was started in an isolated temporary config, but it reported failure
-to start its OAuth callback server in this sandbox. A real account exchange remains
-unverified. Inference used a fixture subprocess. No real token was generated or
-read, and no subscription inference request was made.
-The installed Claude Code 2.1.304 also timed out before initialization during a
-control-only warm-session probe with a fake token. Persistent inference and cache
-hit rates have fixture coverage but still need a real-account smoke test.
-
-The OAuth round trip uses a controlled callback transport and mocked provider
-responses. Browser testing was attempted but Chromium could not start under the
-session sandbox (`bootstrap_check_in: Permission denied`). Loopback listeners were
-also blocked (`listen EPERM`). No real provider credentials or paid inference were
-used, and real sign-in, translation quality, and Twitch insertion remain unverified
-in the user's browser.
-
-The build dependencies and lockfile entries were reused from the pinned sibling
-Lexxyicon installation because npm could not reach the registry. The added runtime
-dependency `@xterm/headless` 5.5.0 was downloaded using curl and verified against
-the registry integrity and Altus lockfile before extraction.
-
-The requirements, server dependencies, reuse plan, and remaining acceptance checks
-are in [the integration design](docs/integration-design.md).
-
-## Verified integration limits
-
-On 20 October 2026:
-
-- The sibling server's serializers produced `hello`, `caption`, `say`, and `fp` messages that
-  this client parsed successfully.
-- `https://server.streamir.app/healthz` answered `200 ok`.
-- `https://server.streamir.app/feed/hexxyi` answered `404 no such channel`.
-- The checked-out server contract supports English only and has no language catalogue.
-- The server-owned fingerprint reference implementation and pinned fixture required
-  by its C8 contract were absent from the sibling checkouts.
-
-The tests do not establish live audio synchronization or browser audio decoding.
-The server thread reports a new Twitch audio-only ingestion path in development.
-Its decoded-sample clock and local first-frame epoch do not establish the viewer
-offset. Pulled-source synchronization remains unqualified until continuous
-original-audio fingerprint compatibility and a live trial pass; existing viewer
-scheduling and fresh-`hello` reset rules still apply.
-The Chrome incoming-chat translator and full audio viewer are not part of this
-composer development build.
+A real local smoke check on 21 October 2026 used the already-installed MLX Qwen
+1.7B Base 4-bit model and an existing reference: 4.08 seconds of 24 kHz speech,
+9 PCM blocks, 1.96 seconds of generation on Metal. This excludes initial model
+load and is one short phrase, not a latency or voice-quality benchmark. The
+CustomVoice steering path and CUDA path still need real-model qualification.

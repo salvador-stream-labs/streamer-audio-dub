@@ -3,3 +3,8 @@ dist/
 test-results/
 .env*
 *.log
+.venv*/
+models/
+voice-config.json
+__pycache__/
+*.pyc

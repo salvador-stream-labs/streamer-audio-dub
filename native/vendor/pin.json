@@ -1,0 +1,5 @@
+{
+  "source": "streamir-server/server/streamir_server/runtime_contract.py",
+  "sha256": "192a918ea4f0a715b30273a4b9bf9e91282686da2479033db1cc2c5b89407609",
+  "contract": "server_intonation_v1"
+}

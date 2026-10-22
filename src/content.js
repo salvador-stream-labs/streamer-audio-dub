@@ -1,16 +1,26 @@
-import {ComposerPanel} from './composer/panel.js';
-const composer = new ComposerPanel();
-let queued = false;
-const observer = new MutationObserver(mutations => {
-  if (queued || mutations.every(m => m.target instanceof Element && m.target.closest('[data-iv-owned="composer"]'))) return;
-  queued = true;
-  requestAnimationFrame(() => { queued = false; composer.sync(); });
-});
-observer.observe(document.body, {childList: true, subtree: true});
-chrome.runtime.sendMessage({type: 'composer-preferences'}).then(value => {
-  if (value?.preferences) composer.configure(value.preferences);
-}).catch(() => {});
-chrome.runtime.onMessage.addListener((message, sender) => {
-  if (sender.id === chrome.runtime.id && message?.type === 'composer-preferences') composer.configure(message.preferences);
-});
-window.addEventListener('pagehide', () => { observer.disconnect(); composer.destroy(); }, {once: true});
+import {VERSION, request} from './voice/contract.js';
+// Injected only by an explicit click on the extension action.
+if (!globalThis.__streamirLocalVoice) {
+  globalThis.__streamirLocalVoice = true;
+  const port = chrome.runtime.connect({name: 'local-voice'});
+  let closed = false;
+  const send = payload => window.postMessage({source: 'streamir-local-voice', v: VERSION, ...payload}, location.origin);
+  function receive(event) {
+    if (closed || event.source !== window || event.origin !== location.origin || event.data?.source !== 'streamir-viewer') return;
+    try {
+      const {source, ...payload} = event.data;
+      port.postMessage(request(payload));
+    } catch { send({id: event.data?.id, error: 'invalid'}); }
+  }
+  window.addEventListener('message', receive);
+  port.onMessage.addListener(send);
+  port.onDisconnect.addListener(() => {
+    void chrome.runtime.lastError;
+    closed = true;
+    window.removeEventListener('message', receive);
+    delete globalThis.__streamirLocalVoice;
+    send({event: 'disconnected'});
+  });
+  window.addEventListener('pagehide', () => port.disconnect(), {once: true});
+  send({event: 'connected'});
+}
