@@ -1,4 +1,4 @@
-import json, sys, unittest
+import base64, hashlib, json, sys, unittest
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'native'))
@@ -121,3 +121,67 @@ class EncryptionTests(unittest.TestCase):
         self.assertEqual(vp.encrypt_pack(build(), KEY, nonce=bytes(12))[4 + n:16 + n], bytes(12))
         with self.assertRaises(vp.PackError): vp.encrypt_pack(b'\x01', KEY)
         with self.assertRaises(vp.PackError): vp.encrypt_pack(build(), KEY, nonce=bytes(8))
+
+from datetime import datetime, timedelta, timezone
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+NOW = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+SEED = bytes([3]) * 32
+def issued(enc, helper, **patch):
+    args = dict(signing_seed=SEED, channel='hexxyi', pack_id='hexxyi-test-icl-1', pack_sha256=hashlib.sha256(enc).hexdigest(),
+                pack_url='https://server.streamir.app/voice/hexxyi/pack/x', model=MODEL,
+                helper_public_key=helper.public_key().public_bytes_raw(), content_key=KEY, now=NOW)
+    return vp.issue_grant(**{**args, **patch})
+
+class GrantTests(unittest.TestCase):
+    def setUp(self):
+        self.helper = X25519PrivateKey.generate(); self.enc = vp.encrypt_pack(build(), KEY)
+        self.pinned = [vp.signing_public_key(SEED)]
+    def open(self, message, **patch):
+        args = dict(pinned_keys=self.pinned, helper_private=self.helper, model=MODEL, ciphertext=self.enc, now=NOW)
+        return vp.open_pack(message, **{**args, **patch})
+    def test_issue_verify_open(self):
+        message = issued(self.enc, self.helper)
+        self.assertEqual(message['grant']['key_id'], vp.key_id(self.pinned[0]))
+        self.assertEqual(message['grant']['expires'], '2026-10-22T12:10:00Z')
+        self.assertEqual(self.open(message).pack_id, 'hexxyi-test-icl-1')
+    def test_rejects_bad_signature_other_key_and_unknown_key_id(self):
+        message = issued(self.enc, self.helper)
+        bad = json.loads(json.dumps(message)); bad['grant']['pack_url'] = 'https://other/'
+        with self.assertRaises(vp.PackError): self.open(bad)
+        with self.assertRaises(vp.PackError): self.open(message, pinned_keys=[vp.signing_public_key(bytes(32))])
+        with self.assertRaises(vp.PackError): self.open(issued(self.enc, self.helper, signing_seed=bytes(32)))
+    def test_rejects_expiry_and_future_issue(self):
+        message = issued(self.enc, self.helper)
+        with self.assertRaises(vp.PackError): self.open(message, now=NOW + timedelta(seconds=601))
+        self.open(message, now=NOW - timedelta(seconds=60))
+        with self.assertRaises(vp.PackError): self.open(message, now=NOW - timedelta(seconds=61))
+    def test_rejects_wrong_helper_key_model_and_digest(self):
+        with self.assertRaises(vp.PackError): self.open(issued(self.enc, X25519PrivateKey.generate()))
+        other = vp.ModelIdentity.parse({**MODEL.to_dict(), 'tts_model_size': 'other'})
+        with self.assertRaises(vp.PackError): self.open(issued(self.enc, self.helper, model=other))
+        with self.assertRaises(vp.PackError): self.open(issued(self.enc, self.helper), ciphertext=self.enc[:-1])
+    def test_rejects_header_mismatch(self):
+        wrong = vp.encrypt_pack(build(channel='hexxyj'), KEY)
+        message = issued(wrong, self.helper)  # grant says hexxyi, header says hexxyj
+        with self.assertRaises(vp.PackError): self.open(message, ciphertext=wrong)
+    def test_wrong_content_key_fails_after_verification(self):
+        with self.assertRaises(vp.PackError): self.open(issued(self.enc, self.helper, content_key=bytes(32)))
+    def test_strict_message_shape(self):
+        message = issued(self.enc, self.helper)
+        for patch in [lambda m: m.update(extra=1), lambda m: m['grant'].update(extra=1), lambda m: m['grant'].pop('key_id'),
+                      lambda m: m['grant']['wrap'].update(data='AAAA')]:
+            bad = json.loads(json.dumps(message)); patch(bad)
+            with self.assertRaises(vp.PackError): self.open(bad)
+
+class FixtureTests(unittest.TestCase):
+    def test_fixture_file_matches_generator(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            vp.write_fixtures(d + '/f.json'); fresh = json.loads(Path(d + '/f.json').read_text())
+        stored = json.loads((ROOT / 'tests/fixtures/voice_grant_v1.json').read_text())
+        self.assertEqual(fresh, stored)
+        helper = X25519PrivateKey.from_private_bytes(vp.unb64url(stored['helper_private_b64url'], 32))
+        pack = vp.open_pack(stored['grant_message'], pinned_keys=[vp.unb64url(stored['signing_public_b64url'], 32)], helper_private=helper,
+                            model=vp.ModelIdentity.parse(stored['model']), ciphertext=base64.b64decode(stored['ciphertext_b64']), now=NOW)
+        self.assertEqual(pack.pack_id, 'hexxyi-test-icl-1')
+        self.assertEqual(vp.canonical(stored['grant_message']['grant']).decode(), stored['canonical_grant'])

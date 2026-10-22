@@ -10,9 +10,14 @@ import os
 import re
 import struct
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
-from cryptography.exceptions import InvalidTag
+from cryptography.exceptions import InvalidSignature, InvalidTag
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 _B64URL = re.compile(r'[A-Za-z0-9_-]*')
 _TOKEN = re.compile(r'[a-z0-9_]{1,16}')
@@ -27,6 +32,13 @@ MAX_REF_TEXT = 1000
 PACK_ID = r'[a-z0-9][a-z0-9_.-]{0,99}'
 _PACK_ID = re.compile(PACK_ID)
 _LANGUAGE = re.compile(r'[a-z]{2,3}')
+GRANT_VERSION = 'voice_grant_v1'
+GRANT_TTL_S = 600
+GRANT_SKEW_S = 60
+GRANT_INFO = b'streamir voice_grant_v1'
+MAX_PACK_URL = 2048
+_SHA256 = re.compile(r'[0-9a-f]{64}')
+_TIME = re.compile(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ')
 
 
 class PackError(ValueError):
@@ -318,3 +330,163 @@ def decrypt_pack(ciphertext: bytes, content_key: bytes) -> bytes:
     if len(plaintext) != header['size']:
         raise PackError('size mismatch')
     return plaintext
+
+
+def signing_public_key(seed: bytes) -> bytes:
+    return Ed25519PrivateKey.from_private_bytes(seed).public_key().public_bytes_raw()
+
+
+def _stamp(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _moment(text) -> datetime:
+    if not isinstance(text, str) or not _TIME.fullmatch(text):
+        raise PackError('invalid timestamp')
+    try:
+        return datetime.strptime(text, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+    except ValueError as error:
+        raise PackError('invalid timestamp') from error
+
+
+def _kek(private: X25519PrivateKey, peer: bytes) -> bytearray:
+    shared = bytearray(private.exchange(X25519PublicKey.from_public_bytes(peer)))
+    try:
+        return bytearray(HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=GRANT_INFO).derive(bytes(shared)))
+    finally:
+        shared[:] = bytes(len(shared))
+
+
+def _wrap_aad(grant: dict) -> bytes:
+    return canonical({k: v for k, v in grant.items() if k != 'wrap'})
+
+
+def issue_grant(*, signing_seed: bytes, channel: str, pack_id: str, pack_sha256: str, pack_url: str, model: ModelIdentity,
+                helper_public_key: bytes, content_key: bytes, now: datetime, ttl_s: int = GRANT_TTL_S,
+                server_private: bytes | None = None, nonce: bytes | None = None) -> dict:
+    signer = Ed25519PrivateKey.from_private_bytes(signing_seed)
+    ephemeral = X25519PrivateKey.generate() if server_private is None else X25519PrivateKey.from_private_bytes(server_private)
+    nonce = os.urandom(12) if nonce is None else nonce
+    if not isinstance(nonce, bytes) or len(nonce) != 12 or not isinstance(content_key, bytes) or len(content_key) != 32:
+        raise PackError('invalid wrap input')
+    kek = _kek(ephemeral, helper_public_key)
+    grant = {'v': GRANT_VERSION, 'channel': channel, 'pack_id': pack_id, 'pack_sha256': pack_sha256, 'pack_url': pack_url,
+             'model': model.to_dict(), 'key_id': key_id(signer.public_key().public_bytes_raw()),
+             'helper_public_key': b64url(helper_public_key), 'server_public_key': b64url(ephemeral.public_key().public_bytes_raw()),
+             'issued': _stamp(now), 'expires': _stamp(now + timedelta(seconds=ttl_s))}
+    try:
+        grant['wrap'] = {'nonce': b64url(nonce), 'data': b64url(AESGCM(bytes(kek)).encrypt(nonce, content_key, _wrap_aad(grant)))}
+    finally:
+        kek[:] = bytes(len(kek))
+    return {'v': GRANT_VERSION, 'grant': grant, 'signature': b64url(signer.sign(canonical(grant)))}
+
+
+def _grant_shape(message) -> tuple[dict, bytes]:
+    if not isinstance(message, dict) or set(message) != {'v', 'grant', 'signature'} or message['v'] != GRANT_VERSION:
+        raise PackError('invalid grant message')
+    grant = message['grant']
+    keys = {'v', 'channel', 'pack_id', 'pack_sha256', 'pack_url', 'model', 'key_id', 'helper_public_key', 'server_public_key',
+            'issued', 'expires', 'wrap'}
+    if not isinstance(grant, dict) or set(grant) != keys or grant['v'] != GRANT_VERSION:
+        raise PackError('invalid grant')
+    for key in ('channel', 'pack_id'):
+        if not isinstance(grant[key], str) or not _PACK_ID.fullmatch(grant[key]):
+            raise PackError(f'invalid {key}')
+    if not isinstance(grant['pack_sha256'], str) or not _SHA256.fullmatch(grant['pack_sha256']):
+        raise PackError('invalid pack_sha256')
+    if not isinstance(grant['pack_url'], str) or not 1 <= len(grant['pack_url']) <= MAX_PACK_URL:
+        raise PackError('invalid pack_url')
+    if ModelIdentity.parse(grant['model']).to_dict() != grant['model']:
+        raise PackError('invalid model identity')
+    if not isinstance(grant['key_id'], str) or not re.fullmatch(r'[0-9a-f]{16}', grant['key_id']):
+        raise PackError('invalid key_id')
+    for key in ('helper_public_key', 'server_public_key'):
+        unb64url(grant[key], 32)
+    _moment(grant['issued']); _moment(grant['expires'])
+    wrap = grant['wrap']
+    if not isinstance(wrap, dict) or set(wrap) != {'nonce', 'data'}:
+        raise PackError('invalid wrap')
+    unb64url(wrap['nonce'], 12); unb64url(wrap['data'], 48)
+    return grant, unb64url(message['signature'], 64)
+
+
+def _verify(message: dict, pinned_keys, helper_private: X25519PrivateKey, model: ModelIdentity, ciphertext: bytes,
+            now: datetime) -> bytearray:
+    grant, signature = _grant_shape(message)
+    matches = [key for key in pinned_keys if isinstance(key, bytes) and len(key) == 32 and key_id(key) == grant['key_id']]
+    if not matches:
+        raise PackError('unknown signing key')
+    try:
+        Ed25519PublicKey.from_public_bytes(matches[0]).verify(signature, canonical(grant))
+    except InvalidSignature as error:
+        raise PackError('bad signature') from error
+    if _moment(grant['issued']) > now + timedelta(seconds=GRANT_SKEW_S):
+        raise PackError('grant issued in the future')
+    if _moment(grant['expires']) <= now:
+        raise PackError('grant expired')
+    helper_public = helper_private.public_key().public_bytes_raw()
+    if unb64url(grant['helper_public_key'], 32) != helper_public:
+        raise PackError('grant is for another helper')
+    if ModelIdentity.parse(grant['model']) != model:
+        raise PackError('model mismatch')
+    if hashlib.sha256(ciphertext).hexdigest() != grant['pack_sha256']:
+        raise PackError('pack digest mismatch')
+    header = public_header(ciphertext)
+    if (header['channel'], header['pack_id'], header['model']) != (grant['channel'], grant['pack_id'], grant['model']):
+        raise PackError('pack header does not match grant')
+    kek = _kek(helper_private, unb64url(grant['server_public_key'], 32))
+    try:
+        wrap = grant['wrap']
+        return bytearray(AESGCM(bytes(kek)).decrypt(unb64url(wrap['nonce'], 12), unb64url(wrap['data'], 48), _wrap_aad(grant)))
+    except InvalidTag as error:
+        raise PackError('key unwrap failed') from error
+    finally:
+        kek[:] = bytes(len(kek))
+
+
+def verify_grant(message: dict, *, pinned_keys: list[bytes], helper_private: X25519PrivateKey, model: ModelIdentity,
+                 ciphertext: bytes, now: datetime) -> bytes:
+    content_key = _verify(message, pinned_keys, helper_private, model, ciphertext, now)
+    try:
+        return bytes(content_key)
+    finally:
+        content_key[:] = bytes(len(content_key))
+
+
+def open_pack(message: dict, *, pinned_keys, helper_private, model, ciphertext, now) -> Pack:
+    content_key = _verify(message, pinned_keys, helper_private, model, ciphertext, now)
+    plaintext = bytearray()
+    try:
+        plaintext = bytearray(decrypt_pack(ciphertext, bytes(content_key)))
+        return parse_pack(plaintext, model)
+    finally:
+        content_key[:] = bytes(len(content_key))
+        plaintext[:] = bytes(len(plaintext))
+
+
+def write_fixtures(path: str) -> None:
+    model = ModelIdentity.parse({'family': 'qwen3_tts', 'tts_model_type': 'base', 'tts_model_size': 'test', 'tokenizer': '12hz',
+                                 'enc_dim': 8, 'num_code_groups': 2})
+    helper, seed, content_key = bytes([1]) * 32, bytes([3]) * 32, bytes([4]) * 32
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    plaintext = build_pack(pack_id='hexxyi-test-icl-1', channel='hexxyi', label='hexxyi', consent_ref='studio:consent:1',
+                           model=model, mode='icl', reference_language='ru', ref_text='\u041f\u0440\u0438\u0432\u0435\u0442',
+                           spk_embedding=b'\x00\x00\x80\x3f' * 8, ref_codes=b'\x05\x00\x00\x00' * 6,
+                           builder={'backend': 'mlx', 'package': 'mlx-audio 0.5.9', 'model_sha256': '0' * 64},
+                           built='2026-10-22T12:00:00Z')
+    ciphertext = encrypt_pack(plaintext, bytes([4]) * 32, nonce=bytes([5]) * 12)
+    digest = hashlib.sha256(ciphertext).hexdigest()
+    helper_public = X25519PrivateKey.from_private_bytes(helper).public_key().public_bytes_raw()
+    message = issue_grant(signing_seed=seed, channel='hexxyi', pack_id='hexxyi-test-icl-1', pack_sha256=digest,
+                          pack_url='https://server.streamir.app/voice/hexxyi/pack/x', model=model,
+                          helper_public_key=helper_public, content_key=content_key, now=now,
+                          server_private=bytes([2]) * 32, nonce=bytes([6]) * 12)
+    public = signing_public_key(seed)
+    vectors = {'model': model.to_dict(), 'plaintext_b64': base64.b64encode(plaintext).decode('ascii'),
+               'ciphertext_b64': base64.b64encode(ciphertext).decode('ascii'), 'pack_sha256': digest,
+               'helper_private_b64url': b64url(helper), 'helper_public_b64url': b64url(helper_public),
+               'signing_seed_b64url': b64url(seed), 'signing_public_b64url': b64url(public), 'key_id': key_id(public),
+               'content_key_b64url': b64url(content_key), 'grant_message': message,
+               'canonical_grant': canonical(message['grant']).decode('ascii')}
+    with open(path, 'w', encoding='utf-8') as out:
+        out.write(json.dumps(vectors, indent=2, sort_keys=True) + '\n')
