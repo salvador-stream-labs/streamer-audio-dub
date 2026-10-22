@@ -82,6 +82,9 @@ class PackHostileHeaderTests(unittest.TestCase):
         with self.assertRaises(vp.PackError): vp.parse_pack(retail(build(), edit), MODEL)
         def shape(h): h['tensors']['spk_embedding']['shape'] = [8.0]
         with self.assertRaises(vp.PackError): vp.parse_pack(retail(build(), shape), MODEL)
+    def test_tensor_spec_missing_shape(self):
+        def edit(h): del h['tensors']['spk_embedding']['shape']
+        with self.assertRaises(vp.PackError): vp.parse_pack(retail(build(), edit), MODEL)
     def test_deep_nesting_duplicates_and_constants(self):
         with self.assertRaises(vp.PackError): vp.parse_pack(retail(build(), raw=b'[' * 100000), MODEL)
         good = json.dumps(json.loads(build()[4:4 + int.from_bytes(build()[:4], 'little')])).encode()

@@ -176,9 +176,13 @@ def _tensor(spec, dtype: str, shape: list, offset: int, body: bytes) -> bytes:
     length = 4
     for dim in shape:
         length *= dim
-    if (not isinstance(spec, dict) or not all(_int_in(spec.get(k), 0, MAX_PLAINTEXT) for k in ('offset', 'length'))
-            or not isinstance(spec['shape'], list) or not all(_int_in(d, 1, MAX_PLAINTEXT) for d in spec['shape']) or set(spec) != {'dtype', 'shape', 'offset', 'length'} or spec['dtype'] != dtype
-            or spec['shape'] != shape or spec['offset'] != offset or spec['length'] != length
+    if not isinstance(spec, dict) or set(spec) != {'dtype', 'shape', 'offset', 'length'}:
+        raise PackError('invalid tensor layout')
+    if not isinstance(spec['shape'], list) or not all(_int_in(d, 1, MAX_PLAINTEXT) for d in spec['shape']):
+        raise PackError('invalid tensor shape')
+    if not all(_int_in(spec[k], 0, MAX_PLAINTEXT) for k in ('offset', 'length')):
+        raise PackError('invalid tensor layout')
+    if (spec['dtype'] != dtype or spec['shape'] != shape or spec['offset'] != offset or spec['length'] != length
             or offset + length > len(body)):
         raise PackError('invalid tensor layout')
     return body[offset:offset + length]
