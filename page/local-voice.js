@@ -8,7 +8,7 @@ export class LocalVoice {
     this.obtainVoice = obtainVoice;
     this.context = playback ? audioContext ?? new AudioContext() : null; this.ownsContext = playback && !audioContext;
     this.playback = playback ? new VoicePlayback(this.context, {onState, ...playbackOptions}) : null;
-    this.pending = new Map(); this.generation = 0; this.started = false; this.closed = false;
+    this.pending = new Map(); this.voiceLoading = null; this.generation = 0; this.started = false; this.closed = false;
     this.receive = event => {
       if (event.source !== this.window || event.origin !== this.window.location.origin ||
           event.data?.source !== 'streamir-local-voice' || event.data.v !== VERSION) return;
@@ -65,32 +65,49 @@ export class LocalVoice {
     const generation = this.generation;
     const status = await this.call('warmup');
     if (generation !== this.generation || this.closed) return;
+    if (this.obtainVoice) await this.ensureVoice();
+    if (generation !== this.generation || this.closed) return;
     this.started = true; this.onState({state: 'ready', ...status});
-    if (this.obtainVoice) {
-      const identity = await this.identity();
-      if (identity.voice !== 'pack') { this.onState({state: 'voice', loaded: false, reason: 'not_pack', voice: identity.voice}); return status; }
-      try { await this.loadVoice(await this.obtainVoice(identity)); }
-      catch (error) {
-        if (error.message !== ERRORS.voice) throw error;
-        await this.loadVoice(await this.obtainVoice(await this.identity()));
-      }
-    }
     return status;
   }
   identity() { return this.call('voice_identity'); }
-  async loadVoice({grant, signature, pack}) {
+  // One load at a time: concurrent callers share it; a stale generation abandons it.
+  ensureVoice() {
+    if (this.voiceLoading) return this.voiceLoading;
+    const generation = this.generation, stale = () => generation !== this.generation || this.closed;
+    const attempt = async () => {
+      const identity = await this.identity();
+      if (stale()) return;
+      if (identity.voice !== 'pack') { this.onState({state: 'voice', loaded: false, reason: 'not_pack', voice: identity.voice}); return; }
+      const voice = await this.obtainVoice(identity);
+      if (stale()) return;
+      await this.loadVoice(voice, generation);
+    };
+    const run = (async () => {
+      try { await attempt(); }
+      catch (error) {
+        if (stale()) return;
+        if (error.message !== ERRORS.voice) throw error;
+        await attempt();
+      }
+    })().finally(() => { if (this.voiceLoading === run) this.voiceLoading = null; });
+    return this.voiceLoading = run;
+  }
+  async loadVoice({grant, signature, pack}, generation = this.generation) {
     const bytes = pack instanceof Uint8Array ? pack : new Uint8Array(pack);
     const sha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
+    const stale = () => generation !== this.generation || this.closed;
+    if (stale()) throw new Error(ERRORS.cancelled);
     const parts = packParts(bytes), id = crypto.randomUUID();
     const load = this.call('voice_load', {grant, signature, size: bytes.length, sha256, parts: parts.length}, id);
     // An early load failure (busy, bad grant) must surface instead of the part errors it causes.
     const failed = new Promise((_, reject) => load.catch(reject)); failed.catch(() => {});
     for (let index = 0; index < parts.length; index++) await Promise.race([this.call('voice_part', {load: id, index, data: parts[index]}), failed]);
     const value = await load;
+    if (stale()) throw new Error(ERRORS.cancelled);
     this.onState({state: 'voice', loaded: true, pack_id: value.pack_id, mode: value.mode});
     return value;
   }
-  async reloadVoice() { await this.loadVoice(await this.obtainVoice(await this.identity())); }
   async speak(value) {
     if (!this.started) throw new Error('Enable local voice first');
     const job = validateJob(value), generation = this.generation;
@@ -98,7 +115,7 @@ export class LocalVoice {
     try { result = await this.call('speak', {job}); }
     catch (error) {
       if (error.message !== ERRORS.no_voice || !this.obtainVoice) throw error;
-      await this.reloadVoice();
+      await this.ensureVoice();
       if (generation !== this.generation || this.closed) return;
       result = await this.call('speak', {job});
     }
@@ -109,7 +126,7 @@ export class LocalVoice {
     return result.info;
   }
   invalidate() {
-    this.generation++; this.playback?.reset();
+    this.generation++; this.voiceLoading = null; this.playback?.reset();
     for (const entry of this.pending.values()) { clearTimeout(entry.timer); entry.reject(new Error(ERRORS.cancelled)); }
     this.pending.clear();
   }

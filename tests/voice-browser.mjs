@@ -36,11 +36,13 @@ try {
           setTimeout(() => {
             window.reply({id: m.id, value: {index: m.index}});
             if (m.index !== window.load.parts - 1) return;
-            if (window.failLoadOnce) { window.failLoadOnce = false; window.helperKey = 'B'.repeat(43); window.reply({id: window.load.id, error: 'voice'}); }
-            else window.reply({id: window.load.id, value: {loaded: true, pack_id: 'p', mode: 'icl'}});
+            setTimeout(() => {
+              if (window.failLoadOnce) { window.failLoadOnce = false; window.helperKey = 'B'.repeat(43); window.reply({id: window.load.id, error: 'voice'}); }
+              else window.reply({id: window.load.id, value: {loaded: true, pack_id: 'p', mode: 'icl'}});
+            }, 30);
           }, 0);
         } else if (m.type === 'speak') {
-          if (window.loseVoice) { window.loseVoice = false; setTimeout(() => window.reply({id: m.id, error: 'no_voice'}), 0); return; }
+          if (window.loseVoice) { const n = +window.loseVoice; window.loseVoice = n > 1 ? n - 1 : false; setTimeout(() => window.reply({id: m.id, error: 'no_voice'}), 0); return; }
           if (m.job.utterance_id === 'held') { window.held = m; return; }
           setTimeout(() => {
             window.reply({id: m.id, event: 'pcm', index: 0, sampleRate: 24000, data: btoa('\0'.repeat(4800))});
@@ -70,15 +72,33 @@ try {
       translatedText: window.forwarded.find(m => m.type === 'speak').job.text};
     await voice.close();
     const obtained = [];
-    const quiet = new LocalVoice({playback: false, onState: s => window.states.push(s), obtainVoice: async identity => { obtained.push(identity.public_key); return {grant: {v: 'voice_grant_v1'}, signature: 'A'.repeat(86), pack: new Uint8Array(20000).fill(3)}; }});
+    const quiet = new LocalVoice({playback: false, onState: s => window.states.push(s), obtainVoice: async identity => { await window.gate; obtained.push(identity.public_key); return {grant: {v: 'voice_grant_v1'}, signature: 'A'.repeat(86), pack: new Uint8Array(20000).fill(3)}; }});
     window.failLoadOnce = true;
     await quiet.start();
     window.loseVoice = true;
     const generated = await quiet.speak({session: 'browser', utterance_id: '9', text: 'Again.', language: 'en', t_start: 1, t_end: 2, prosody: null});
-    result.reloaded = obtained;
+    result.reloaded = [...obtained];
     result.partCount = window.forwarded.filter(m => m.type === 'voice_part').length;
     result.generatedSamples = generated.samples.length;
     result.loadSize = window.load.size;
+    const quietJob = {session: 'browser', utterance_id: 'x', text: 'Again.', language: 'en', t_start: 1, t_end: 2, prosody: null};
+    const loads = () => window.forwarded.filter(m => m.type === 'voice_load').length;
+    // Two speaks lose the voice together: they share one load.
+    window.loseVoice = 2; const before = loads();
+    const both = await Promise.allSettled([quiet.speak({...quietJob, utterance_id: '10'}), quiet.speak({...job, utterance_id: '11'})]);
+    result.concurrent = both.map(r => r.status); result.concurrentLoads = loads() - before;
+    // A second no_voice after one reload rejects.
+    window.loseVoice = 2; const again = await quiet.speak({...quietJob, utterance_id: '12'}).catch(e => e.message);
+    window.loseVoice = false;
+    result.secondLoss = again;
+    // A reset while obtainVoice is pending abandons the reload.
+    let release; window.gate = new Promise(resolve => { release = resolve; });
+    window.loseVoice = true; const loadsBefore = loads(); const mark = window.states.length;
+    const abandoned = quiet.speak({...quietJob, utterance_id: '13'}).catch(e => e.message);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await quiet.reset(); release(); window.gate = null;
+    result.abandoned = await abandoned; result.abandonedLoads = loads() - loadsBefore;
+    result.loadedAfterReset = window.states.slice(mark).some(s => s.state === 'voice' && s.loaded);
     await quiet.close();
     return result;
   });
@@ -86,6 +106,9 @@ try {
   assert.match(states.cancellation, /cancelled/); assert.equal(states.queued, 0); assert.equal(states.translatedText, 'Thank you.');
   assert.deepEqual(states.reloaded, ['A'.repeat(43), 'B'.repeat(43), 'B'.repeat(43)]);
   assert.equal(states.partCount, 6); assert.equal(states.generatedSamples, 2400); assert.equal(states.loadSize, 20000);
+  assert.deepEqual(states.concurrent, ['fulfilled', 'fulfilled']); assert.equal(states.concurrentLoads, 1);
+  assert.match(states.secondLoss, /Load the streamer voice first/);
+  assert.equal(states.abandoned, undefined); assert.equal(states.abandonedLoads, 0); assert.equal(states.loadedAfterReset, false);
   assert(states.states.some(s => s.state === 'voice' && s.loaded === true && s.pack_id === 'p' && s.mode === 'icl'));
   await page.goto(origin + '/settings.html');
   await page.setViewportSize({width: 360, height: 780});
