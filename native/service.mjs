@@ -53,7 +53,7 @@ export class VoiceService {
     if (t) this.send({id: t.id, error});
   }
   openTransfer(m) {
-    if (this.transfer || this.active?.message.type === 'speak') { this.seenRequests.delete(m.id); this.send({id: m.id, error: 'busy'}); return; } // A refused load may retry under its id.
+    if (this.transfer || this.active?.message.type === 'speak') { this.send({id: m.id, error: 'busy'}); return; }
     this.transfer = {id: m.id, message: m, parts: [], bytes: 0, at: this.now()};
   }
   takePart(m) {

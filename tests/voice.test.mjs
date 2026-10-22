@@ -148,5 +148,5 @@ test('load waits behind generation, and worker voice errors reach the page uncha
   s.receive(message('one')); w[0].respond({type: 'ready', device: 'metal'});
   s.receive({id: 'load', v: VERSION, type: 'voice_load', grant, signature: 'A'.repeat(86), size: 4, sha256: 'a'.repeat(64), parts: 1}); assert.equal(o.at(-1).error, 'busy');
   w[0].respond({type: 'error', id: 'one', error: 'no_voice'}); assert.equal(o.at(-1).error, 'no_voice');
-  transfer(s, new Uint8Array(4)); w[0].respond({type: 'error', id: 'load', error: 'voice'}); assert.equal(o.at(-1).error, 'voice');
+  transfer(s, new Uint8Array(4), 'load2'); w[0].respond({type: 'error', id: 'load2', error: 'voice'}); assert.equal(o.at(-1).error, 'voice');
 });
