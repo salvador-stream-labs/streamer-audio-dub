@@ -38,7 +38,7 @@ GRANT_SKEW_S = 60
 GRANT_INFO = b'streamir voice_grant_v1'
 MAX_PACK_URL = 2048
 _SHA256 = re.compile(r'[0-9a-f]{64}')
-_TIME = re.compile(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ')
+_TIME = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z')
 
 
 class PackError(ValueError):
@@ -46,7 +46,7 @@ class PackError(ValueError):
 
 
 def canonical(value: dict) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode('ascii')
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True, allow_nan=False).encode('ascii')
 
 
 def b64url(data: bytes) -> str:
@@ -350,7 +350,10 @@ def _moment(text) -> datetime:
 
 
 def _kek(private: X25519PrivateKey, peer: bytes, helper_public: bytes, server_public: bytes) -> bytearray:
-    shared = bytearray(private.exchange(X25519PublicKey.from_public_bytes(peer)))
+    try:
+        shared = bytearray(private.exchange(X25519PublicKey.from_public_bytes(peer)))
+    except ValueError as error:  # Wrong length or a low-order point (all-zero shared secret).
+        raise PackError('invalid public key') from error
     try:
         return bytearray(HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
                     info=GRANT_INFO + helper_public + server_public).derive(bytes(shared)))
@@ -365,6 +368,8 @@ def _wrap_aad(grant: dict) -> bytes:
 def issue_grant(*, signing_seed: bytes, channel: str, pack_id: str, pack_sha256: str, pack_url: str, model: ModelIdentity,
                 helper_public_key: bytes, content_key: bytes, now: datetime, ttl_s: int = GRANT_TTL_S,
                 server_private: bytes | None = None, nonce: bytes | None = None) -> dict:
+    if not isinstance(helper_public_key, bytes) or len(helper_public_key) != 32:
+        raise PackError('helper public key must be 32 bytes')
     signer = Ed25519PrivateKey.from_private_bytes(signing_seed)
     ephemeral = X25519PrivateKey.generate() if server_private is None else X25519PrivateKey.from_private_bytes(server_private)
     nonce = os.urandom(12) if nonce is None else nonce
@@ -463,6 +468,7 @@ def open_pack(message: dict, *, pinned_keys, helper_private, model, ciphertext, 
         plaintext = bytearray(decrypt_pack(ciphertext, bytes(content_key)))
         return parse_pack(plaintext, model)
     finally:
+        # Best effort: AESGCM.decrypt returns immutable bytes that cannot be wiped, so only these copies are zeroed.
         content_key[:] = bytes(len(content_key))
         plaintext[:] = bytes(len(plaintext))
 

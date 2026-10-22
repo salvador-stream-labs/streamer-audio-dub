@@ -6,6 +6,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import statistics
 import sys
 import time
@@ -58,12 +59,12 @@ def check_reference(path):
 
 def lenient_identity(voice, config):
     """Identity for non-pack modes; CustomVoice configs lack fields the strict parser needs, so never raise."""
-    def text(value):
-        return value if isinstance(value, str) and value else 'unknown'
-    tokenizer = text(config.get('tokenizer_type'))
+    def text(value):  # Bounded tokens keep model_id within the host's 64-character limit.
+        return value if isinstance(value, str) and re.fullmatch(r'[a-z0-9_]{1,16}', value) else 'unknown'
+    tokenizer = config.get('tokenizer_type')
     model = {'family': 'qwen3_tts', 'tts_model_type': text(config.get('tts_model_type')),
              'tts_model_size': text(config.get('tts_model_size')),
-             'tokenizer': '12hz' if tokenizer.endswith('_12hz') else tokenizer}
+             'tokenizer': '12hz' if isinstance(tokenizer, str) and tokenizer.endswith('_12hz') else text(tokenizer)}
     return {'voice': voice, 'model': model,
             'model_id': f"qwen3_tts-{model['tts_model_type']}-{model['tts_model_size']}-{model['tokenizer']}"}
 

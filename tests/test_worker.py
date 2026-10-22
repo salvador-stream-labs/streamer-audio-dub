@@ -97,6 +97,9 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(identity['voice'], 'preset'); self.assertNotIn('public_key', identity)
         self.assertEqual(identity['model_id'], 'qwen3_tts-custom_voice-1b7-12hz')
         self.assertEqual(lenient_identity('reference', {})['model_id'], 'qwen3_tts-unknown-unknown-unknown')
+        odd = lenient_identity('reference', {'tts_model_type': 'base', 'tts_model_size': 'x' * 200, 'tokenizer_type': 'Weird/Tok'})
+        self.assertEqual(odd['model_id'], 'qwen3_tts-base-unknown-unknown'); self.assertLessEqual(len(odd['model_id']), 64)
+        self.assertLessEqual(len(lenient_identity('preset', {k: 'a' * 16 for k in ('tts_model_type', 'tts_model_size', 'tokenizer_type')})['model_id']), 64)
 
 
 if __name__ == '__main__': unittest.main()

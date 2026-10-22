@@ -11,6 +11,7 @@ CONFIG_0B6 = {**CONFIG_1B7, 'tts_model_size': '0b6', 'speaker_encoder_config': {
 class EncodingTests(unittest.TestCase):
     def test_canonical_json_is_sorted_compact_ascii(self):
         self.assertEqual(vp.canonical({'b': 1, 'a': {'z': 'é', 'y': [1, 2]}}), b'{"a":{"y":[1,2],"z":"\\u00e9"},"b":1}')
+        with self.assertRaises(ValueError): vp.canonical({'x': float('nan')})
     def test_base64url_round_trip_and_length_check(self):
         self.assertEqual(vp.b64url(bytes(32)), 'A' * 43)
         self.assertEqual(vp.unb64url('A' * 43, 32), bytes(32))
@@ -172,6 +173,15 @@ class GrantTests(unittest.TestCase):
                       lambda m: m['grant']['wrap'].update(data='AAAA')]:
             bad = json.loads(json.dumps(message)); patch(bad)
             with self.assertRaises(vp.PackError): self.open(bad)
+    def test_helper_key_must_be_a_valid_x25519_point(self):
+        for key in [bytes(31), bytes(32)]:  # wrong length; all-zero is low order
+            with self.assertRaises(vp.PackError): issued(self.enc, self.helper, helper_public_key=key)
+        with self.assertRaises(vp.PackError): vp._kek(self.helper, bytes(32), bytes(32), bytes(32))  # verify's unwrap path
+    def test_timestamps_are_ascii_digits_only(self):
+        arabic = '\u0662\u0660\u0662\u0666-\u0661\u0660-\u0662\u0662T\u0661\u0662:\u0660\u0660:\u0660\u0660Z'
+        self.assertIsNone(vp._TIME.fullmatch(arabic))
+        with self.assertRaises(vp.PackError): vp._moment(arabic)
+        self.assertEqual(vp._moment('2026-10-22T12:00:00Z'), NOW)
 
 class FixtureTests(unittest.TestCase):
     def test_fixture_file_matches_generator(self):
