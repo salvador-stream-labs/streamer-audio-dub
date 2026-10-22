@@ -6,15 +6,22 @@ Python standard library and `cryptography`.
 import base64
 import hashlib
 import json
+import os
 import re
 import struct
 from dataclasses import dataclass
+
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 _B64URL = re.compile(r'[A-Za-z0-9_-]*')
 _TOKEN = re.compile(r'[a-z0-9_]{1,16}')
 
 PACK_VERSION = 'voice_pack_v1'
 MAX_PLAINTEXT = 1 << 20
+ENC_VERSION = 'voice_pack_enc_v1'
+MAX_CIPHERTEXT = 4 << 20
+MAX_PUBLIC_HEADER = 4096
 MAX_REF_FRAMES = 160
 MAX_REF_TEXT = 1000
 PACK_ID = r'[a-z0-9][a-z0-9_.-]{0,99}'
@@ -172,6 +179,13 @@ def _no_constant(name: str):
     raise PackError('invalid header constant')
 
 
+def _json_header(raw: bytes):
+    try:
+        return json.loads(bytes(raw).decode('utf-8'), object_pairs_hook=_no_duplicates, parse_constant=_no_constant)
+    except (ValueError, RecursionError) as error:
+        raise PackError('invalid header') from error
+
+
 def _tensor(spec, dtype: str, shape: list, offset: int, body: bytes) -> bytes:
     length = 4
     for dim in shape:
@@ -194,11 +208,7 @@ def parse_pack(plaintext: bytes, model: ModelIdentity) -> Pack:
     size = int.from_bytes(plaintext[:4], 'little')
     if size > MAX_PLAINTEXT or 4 + size > len(plaintext):
         raise PackError('invalid header length')
-    try:
-        header = json.loads(bytes(plaintext[4:4 + size]).decode('utf-8'), object_pairs_hook=_no_duplicates,
-                            parse_constant=_no_constant)
-    except (ValueError, RecursionError) as error:
-        raise PackError('invalid header') from error
+    header = _json_header(plaintext[4:4 + size])
     body = bytes(plaintext[4 + size:])
     keys = {'v', 'pack_id', 'channel', 'voice', 'model', 'mode', 'reference_language', 'tensors', 'built', 'builder'}
     if not isinstance(header, dict) or set(header) - {'ref_text'} != keys or header['v'] != PACK_VERSION:
@@ -240,3 +250,71 @@ def parse_pack(plaintext: bytes, model: ModelIdentity) -> Pack:
     if end != len(body):
         raise PackError('trailing tensor data')
     return Pack(header, embedding, ref_codes)
+
+
+def _public_header(header, raw: bytes) -> dict:
+    keys = {'v', 'pack_id', 'channel', 'model', 'cipher', 'size'}
+    if not isinstance(header, dict) or set(header) != keys or header['v'] != ENC_VERSION or header['cipher'] != 'aes-256-gcm':
+        raise PackError('invalid header')
+    for key in ('pack_id', 'channel'):
+        if not isinstance(header[key], str) or not _PACK_ID.fullmatch(header[key]):
+            raise PackError(f'invalid {key}')
+    if ModelIdentity.parse(header['model']).to_dict() != header['model'] or not _int_in(header['size'], 0, MAX_PLAINTEXT):
+        raise PackError('invalid header')
+    if canonical(header) != raw:
+        raise PackError('non-canonical header')
+    return header
+
+
+def _split(ciphertext: bytes) -> tuple[dict, bytes, bytes, bytes]:
+    if not isinstance(ciphertext, (bytes, bytearray)) or not 4 <= len(ciphertext) <= MAX_CIPHERTEXT:
+        raise PackError('invalid ciphertext size')
+    size = int.from_bytes(ciphertext[:4], 'little')
+    if size > MAX_PUBLIC_HEADER or 4 + size > len(ciphertext):
+        raise PackError('invalid header length')
+    raw = bytes(ciphertext[4:4 + size])
+    return _public_header(_json_header(raw), raw), raw, bytes(ciphertext[4 + size:16 + size]), bytes(ciphertext[16 + size:])
+
+
+def public_header(ciphertext: bytes) -> dict:
+    return _split(ciphertext)[0]
+
+
+def _aead(content_key: bytes) -> AESGCM:
+    if not isinstance(content_key, (bytes, bytearray)) or len(content_key) != 32:
+        raise PackError('content key must be 32 bytes')
+    return AESGCM(bytes(content_key))
+
+
+def encrypt_pack(plaintext: bytes, content_key: bytes, *, nonce: bytes | None = None) -> bytes:
+    aead = _aead(content_key)
+    nonce = os.urandom(12) if nonce is None else nonce
+    if not isinstance(nonce, bytes) or len(nonce) != 12:
+        raise PackError('nonce must be 12 bytes')
+    if not isinstance(plaintext, (bytes, bytearray)) or not 4 <= len(plaintext) <= MAX_PLAINTEXT:
+        raise PackError('invalid pack size')
+    size = int.from_bytes(plaintext[:4], 'little')
+    if size > MAX_PLAINTEXT or 4 + size > len(plaintext):
+        raise PackError('invalid header length')
+    inner = _json_header(plaintext[4:4 + size])
+    if not isinstance(inner, dict) or not all(k in inner for k in ('pack_id', 'channel', 'model')):
+        raise PackError('invalid header')
+    header = {'v': ENC_VERSION, 'pack_id': inner['pack_id'], 'channel': inner['channel'], 'model': inner['model'],
+              'cipher': 'aes-256-gcm', 'size': len(plaintext)}
+    raw = canonical(header)
+    _public_header(header, raw)
+    return len(raw).to_bytes(4, 'little') + raw + nonce + aead.encrypt(nonce, bytes(plaintext), raw)
+
+
+def decrypt_pack(ciphertext: bytes, content_key: bytes) -> bytes:
+    aead = _aead(content_key)
+    header, raw, nonce, sealed = _split(ciphertext)
+    if len(nonce) != 12:
+        raise PackError('truncated ciphertext')
+    try:
+        plaintext = aead.decrypt(nonce, sealed, raw)
+    except InvalidTag as error:
+        raise PackError('decryption failed') from error
+    if len(plaintext) != header['size']:
+        raise PackError('size mismatch')
+    return plaintext

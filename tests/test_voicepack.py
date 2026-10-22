@@ -90,3 +90,34 @@ class PackHostileHeaderTests(unittest.TestCase):
         good = json.dumps(json.loads(build()[4:4 + int.from_bytes(build()[:4], 'little')])).encode()
         with self.assertRaises(vp.PackError): vp.parse_pack(retail(build(), raw=good[:-1] + b',"v":"voice_pack_v1"}'), MODEL)
         with self.assertRaises(vp.PackError): vp.parse_pack(retail(build(), raw=good[:-1] + b',"x":NaN}'), MODEL)
+
+KEY = bytes(range(32))
+class EncryptionTests(unittest.TestCase):
+    def test_encrypt_decrypt_round_trip_and_public_header(self):
+        plaintext = build(); enc = vp.encrypt_pack(plaintext, KEY)
+        self.assertEqual(vp.decrypt_pack(enc, KEY), plaintext)
+        header = vp.public_header(enc)
+        self.assertEqual(header, {'v': 'voice_pack_enc_v1', 'pack_id': 'hexxyi-test-icl-1', 'channel': 'hexxyi',
+                                  'model': MODEL.to_dict(), 'cipher': 'aes-256-gcm', 'size': len(plaintext)})
+    def test_header_is_authenticated(self):
+        enc = bytearray(vp.encrypt_pack(build(), KEY)); n = int.from_bytes(enc[:4], 'little')
+        enc[4:4 + n] = enc[4:4 + n].replace(b'"channel":"hexxyi"', b'"channel":"hexxyj"')
+        with self.assertRaises(vp.PackError): vp.decrypt_pack(bytes(enc), KEY)
+        with self.assertRaises(vp.PackError): vp.decrypt_pack(vp.encrypt_pack(build(), KEY), bytes(32))
+    def test_ciphertext_bounds(self):
+        with self.assertRaises(vp.PackError): vp.public_header(b'\x00\x00\x40\x00' + bytes(10))
+        with self.assertRaises(vp.PackError): vp.decrypt_pack(bytes(vp.MAX_CIPHERTEXT + 1), KEY)
+        with self.assertRaises(vp.PackError): vp.encrypt_pack(build(), bytes(16))
+    def test_public_header_rejects_hostile_input(self):
+        def wrap(raw): return len(raw).to_bytes(4, 'little') + raw + bytes(40)
+        good = json.dumps(vp.public_header(vp.encrypt_pack(build(), KEY))).encode()
+        for raw in [b'[' * 100000, good[:-1] + b',"v":"voice_pack_enc_v1"}', good[:-1] + b',"x":NaN}', good[:-1] + b',"x":1}',
+                    good.replace(b'aes-256-gcm', b'none'), good.replace(b'"hexxyi"', b'"../x"', 1), b'\xff']:
+            with self.assertRaises(vp.PackError): vp.public_header(wrap(raw))
+    def test_encrypt_uses_fresh_nonce_and_rejects_bad_plaintext(self):
+        a, b = vp.encrypt_pack(build(), KEY), vp.encrypt_pack(build(), KEY)
+        self.assertNotEqual(a, b)
+        n = int.from_bytes(a[:4], 'little')
+        self.assertEqual(vp.encrypt_pack(build(), KEY, nonce=bytes(12))[4 + n:16 + n], bytes(12))
+        with self.assertRaises(vp.PackError): vp.encrypt_pack(b'\x01', KEY)
+        with self.assertRaises(vp.PackError): vp.encrypt_pack(build(), KEY, nonce=bytes(8))
