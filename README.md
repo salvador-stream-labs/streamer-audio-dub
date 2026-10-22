@@ -101,6 +101,59 @@ Test the model before registering it:
 node native/smoke.mjs voice-config.json /tmp/streamir-voice.wav
 ```
 
+## Streamer voice pack
+
+In pack mode the streamer's voice is not configured on the viewer's computer. The
+viewer page obtains an encrypted voice pack and a signed grant from Streamir and hands
+them to the helper. Install the 1.7B Base 4-bit MLX model for this mode (CustomVoice
+above remains the alternative when no pack is used):
+
+```sh
+.venv-qwen/bin/hf download mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit --local-dir models/qwen-base
+```
+
+```json
+{
+  "python": "/absolute/path/to/.venv-qwen/bin/python",
+  "modelPath": "/absolute/path/to/models/qwen-base",
+  "backend": "mlx",
+  "device": "metal",
+  "mode": "base",
+  "voice": "pack",
+  "voicePublicKeys": ["<production key, published at GET /voice/public-key>"]
+}
+```
+
+There are no `referenceAudio` or `referenceText` fields in pack mode. The helper only
+accepts grants signed by one of the pinned `voicePublicKeys` (one to four keys).
+
+The owner builds a pack from a reference recording with the helper's own model
+(this writes the `.enc` pack, its public `.json` summary and a `.key` content key):
+
+```sh
+node native/pack.mjs build --config voice-config.json --reference REF.wav --transcript "TEXT" \
+  --reference-language ru --channel NAME --label LABEL --consent-ref REF --mode icl --out DIR
+node native/pack.mjs inspect --config voice-config.json PACK.enc
+```
+
+`--mode` is `icl` (reference audio codes and transcript) or `embedding` (speaker
+embedding only). Verify a pack end to end, with a throwaway signing key and a
+development grant instead of the production server:
+
+```sh
+node native/smoke.mjs voice-config.json /tmp/streamir-pack.wav --pack PACK.enc --key PACK.key
+```
+
+Python tests for the pack format and worker run with
+`PYTHON=.venv-qwen/bin/python npm run test:python`.
+
+Threat model. The pack is decrypted only in the helper's memory, and the voice is
+not stored on your computer: the pack and its key are never written to disk by the
+helper, and a worker restart discards them. This does not make extraction
+impossible. A determined viewer with a debugger could still extract the conditioning
+from the helper while it runs. Revoking a pack or key stops new sessions from
+obtaining a grant; it does not recall a voice already loaded into a running helper.
+
 Register the helper using the extension ID shown on its setup page:
 
 ```sh
@@ -142,3 +195,11 @@ A real local smoke check on 21 October 2026 used the already-installed MLX Qwen
 9 PCM blocks, 1.96 seconds of generation on Metal. This excludes initial model
 load and is one short phrase, not a latency or voice-quality benchmark. The
 CustomVoice steering path and CUDA path still need real-model qualification.
+
+A real-model smoke on 22 October 2026 used the same MLX 1.7B Base 4-bit model on
+Metal with development grants (a throwaway signing key) for the two packs built from
+the streamer reference: `icl` 3.68 seconds of speech, 1.69 seconds of generation;
+`embedding` 2.08 seconds, 0.92 seconds; both loaded with `loaded: true`. The reference-mode
+render of the same phrase was 4.56 seconds, 2.44 seconds of generation. Listening,
+whether either pack sounds like the streamer, and the `icl` versus `embedding` choice
+belong to the owner and are pending.

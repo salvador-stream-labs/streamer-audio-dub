@@ -90,6 +90,51 @@ by `value` metadata or an `error`. PCM is mono little-endian signed 16-bit at 24
 Each worker block is at most 12,000 samples, far below Chrome's 1 MB host message
 limit. The page verifies all chunk indices and final sample/chunk counts.
 
+## Voice pack messages and errors
+
+In pack mode (`voice: "pack"` in the local configuration) the helper starts without
+a voice and needs a grant and pack before it can speak. The bridge adds three
+requests, all with `v: "local_voice_v1"` and a unique `id`:
+
+- `voice_identity` returns `{voice, model, model_id, public_key}`. `public_key` is the
+  helper's per-process X25519 key that a grant must be wrapped for.
+- `voice_load` has `grant` (a `voice_grant_v1` object), `signature` (86 base64url
+  characters), `size` (ciphertext bytes), `sha256` (lowercase hex of the ciphertext)
+  and `parts`, which must equal `ceil(size / 16384)`. It opens a transfer and is
+  answered once, at the end, with `{loaded: true, pack_id, mode}` or an error.
+- `voice_part` has `load` (the `voice_load` id), `index` (consecutive from 0) and
+  `data` (base64). Each part answers `{index}`. Every part except the last is
+  exactly 16 KiB (16,384 bytes); at most 256 parts and 4 MiB (4,194,304 bytes) in total.
+  The service checks size and SHA-256 before handing the pack to the worker.
+
+A second `voice_load` while a transfer or a speech is active fails with `busy`; an
+incomplete transfer expires with the queue age. The worker adds two error codes:
+`no_voice` (speech requested before a pack is loaded) and `voice` (grant or pack
+rejected: bad signature, expiry, wrong helper or model, digest mismatch, undecryptable).
+`status` includes `voice`: `{state: "none"}` or `{state: "loaded", pack_id}`.
+
+Adapter options for pack mode:
+
+| Option | Meaning |
+| --- | --- |
+| `playback` | Default `true`. Set `false` to generate without any audio output: no AudioContext or scheduler is created and `speak` resolves with the result. |
+| `obtainVoice(identity)` | Async page callback given the helper identity (`voice_identity` result); returns `{grant, signature, pack}` fetched from Streamir, with `pack` as bytes. |
+
+`voice.identity()` and `voice.loadVoice({grant, signature, pack})` are also exposed.
+Reload behaviour: `start()` loads the voice after warmup when `obtainVoice` is set.
+Only one load is in flight at a time and concurrent callers share it. Each attempt
+reads the identity, calls `obtainVoice`, then `loadVoice`. If a `speak` fails with
+`no_voice`, the adapter runs one load and replays the request once. If a load fails
+with `voice`, it obtains a new grant and tries once more, then reports the error.
+`reset()` or `close()` during a load makes that load stale and it is discarded. A
+worker restart (a timeout, or a reset during generation) discards the loaded voice and
+requires a new grant; grants are bound to the helper's per-process key and are not reusable.
+
+Threat model. The pack is decrypted only in the helper's memory and the voice is not
+stored on your computer. A determined viewer with a debugger could still extract the
+conditioning while the helper runs. Revocation stops new sessions from receiving a
+grant; it does not recall a voice already loaded.
+
 ## Timing and resource policy
 
 There is one active synthesis and at most three queued requests. Queued requests
