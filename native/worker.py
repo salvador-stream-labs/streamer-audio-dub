@@ -142,7 +142,7 @@ class Engine:
         self.can_instruct = config['mode'] == 'custom_voice' and model_config.get('tts_model_size') == '1b7'
         self.prompt = self.reference_audio = self.pack_voice = None
         self.voice = True
-        mode = config.get('voice') if config['mode'] == 'base' else 'preset'
+        mode = config.get('voice', 'reference') if config['mode'] == 'base' else 'preset'
         if mode == 'pack':
             identity = ModelIdentity.from_config(model_config)
             self.pack_voice = PackVoice(identity, [unb64url(k, 32) for k in config['voicePublicKeys']])
