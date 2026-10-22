@@ -131,13 +131,14 @@ The owner builds a pack from a reference recording with the helper's own model
 (this writes the `.enc` pack, its public `.json` summary and a `.key` content key):
 
 ```sh
-node native/pack.mjs build --config voice-config.json --reference REF.wav --transcript "TEXT" \
+node native/pack.mjs build --config voice-config.json --reference REF.wav --transcript REF.txt \
   --reference-language ru --channel NAME --label LABEL --consent-ref REF --mode icl --out DIR
 node native/pack.mjs inspect --config voice-config.json PACK.enc
 ```
 
-`--mode` is `icl` (reference audio codes and transcript) or `embedding` (speaker
-embedding only). Verify a pack end to end, with a throwaway signing key and a
+`--transcript` is the path of a UTF-8 text file holding the reference's transcript, not
+the text itself. `--mode` is `icl` (reference audio codes and transcript) or `embedding`
+(speaker embedding only). Verify a pack end to end, with a throwaway signing key and a
 development grant instead of the production server:
 
 ```sh
@@ -203,3 +204,7 @@ the streamer reference: `icl` 3.68 seconds of speech, 1.69 seconds of generation
 render of the same phrase was 4.56 seconds, 2.44 seconds of generation. Listening,
 whether either pack sounds like the streamer, and the `icl` versus `embedding` choice
 belong to the owner and are pending.
+
+The PyTorch (`backend: "torch"`) pack path, both building a pack and loading one, has
+not been executed on any machine. It was written against the qwen-tts 0.1.1 source and
+needs a real-machine qualification before that backend ships with voice packs.
