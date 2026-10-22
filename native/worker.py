@@ -1,6 +1,7 @@
 """Resident local Qwen runtime. Stdout is NDJSON; model diagnostics go to stderr."""
 import base64
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 import json
 import math
 import os
@@ -9,12 +10,76 @@ import statistics
 import sys
 import time
 
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+import voicepack
 from vendor.runtime_contract import Analysis
+from voicepack import MAX_CIPHERTEXT, ModelIdentity, PackError, b64url, unb64url
 
 LANGUAGES = {'en': 'English', 'ru': 'Russian', 'de': 'German', 'fr': 'French', 'es': 'Spanish',
              'it': 'Italian', 'pt': 'Portuguese', 'ja': 'Japanese', 'ko': 'Korean', 'zh': 'Chinese'}
 RATE = 24000
 MAX_SECONDS = 45
+MAX_LINE = 32768
+MAX_LOAD_LINE = 8 * 1024 * 1024
+LOAD_PREFIX = b'{"type":"load_voice"'
+
+
+class Failure(Exception):
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+def read_message(stream):
+    """One bounded NDJSON object, or None when the caller must stop reading."""
+    line = stream.readline(MAX_LOAD_LINE + 1)
+    if not line or len(line) > MAX_LOAD_LINE or (len(line) > MAX_LINE and not line.startswith(LOAD_PREFIX)):
+        return None
+    try:
+        message = json.loads(line)
+    except ValueError:
+        raise Failure('invalid') from None
+    if not isinstance(message, dict):
+        raise Failure('invalid')
+    return message
+
+
+def check_reference(path):
+    import wave
+    ref = Path(path)
+    if not ref.is_absolute() or not ref.is_file() or ref.stat().st_size > 10 * 1024**2:
+        raise ValueError('Use a local reference WAV')
+    with wave.open(str(ref), 'rb') as wav:
+        if wav.getnchannels() != 1 or wav.getsampwidth() != 2 or not 3 <= wav.getnframes() / wav.getframerate() <= 12:
+            raise ValueError('Reference must be 3–12 seconds of mono PCM16 WAV')
+
+
+class PackVoice:
+    def __init__(self, identity, pinned_keys):
+        self.identity, self.pinned_keys = identity, pinned_keys
+        self.private = X25519PrivateKey.generate()
+
+    def identity_message(self):
+        public = self.private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        return {'voice': 'pack', 'model': self.identity.to_dict(), 'model_id': self.identity.id, 'public_key': b64url(public)}
+
+    def load(self, message, pack_b64, now=None):
+        if not isinstance(message, dict) or message.get('v') != voicepack.GRANT_VERSION or not isinstance(pack_b64, str) \
+                or len(pack_b64) > MAX_CIPHERTEXT * 4 // 3 + 4:
+            raise Failure('invalid')
+        try:
+            ciphertext = base64.b64decode(pack_b64, validate=True)
+        except ValueError:
+            raise Failure('invalid') from None
+        if len(ciphertext) > MAX_CIPHERTEXT:
+            raise Failure('invalid')
+        try:
+            return voicepack.open_pack(message, pinned_keys=self.pinned_keys, helper_private=self.private,
+                                       model=self.identity, ciphertext=ciphertext, now=now or datetime.now(timezone.utc))
+        except PackError:
+            raise Failure('voice') from None
 
 
 def validate_job(job):
@@ -75,15 +140,19 @@ class Engine:
         if model_config.get('tts_model_type') != config['mode']:
             raise ValueError('Model type does not match configuration')
         self.can_instruct = config['mode'] == 'custom_voice' and model_config.get('tts_model_size') == '1b7'
-        self.prompt = self.reference_audio = None
-        if config['mode'] == 'base':
-            import wave
-            ref = Path(config['referenceAudio'])
-            if not ref.is_absolute() or not ref.is_file() or ref.stat().st_size > 10 * 1024**2:
-                raise ValueError('Use a local reference WAV')
-            with wave.open(str(ref), 'rb') as wav:
-                if wav.getnchannels() != 1 or wav.getsampwidth() != 2 or not 3 <= wav.getnframes() / wav.getframerate() <= 12:
-                    raise ValueError('Reference must be 3–12 seconds of mono PCM16 WAV')
+        self.prompt = self.reference_audio = self.pack_voice = None
+        self.voice = True
+        mode = config.get('voice') if config['mode'] == 'base' else 'preset'
+        if mode == 'pack':
+            identity = ModelIdentity.from_config(model_config)
+            self.pack_voice = PackVoice(identity, [unb64url(k, 32) for k in config['voicePublicKeys']])
+            self.voice = None
+            self.identity = self.pack_voice.identity_message()
+        else:
+            if mode == 'reference':
+                check_reference(config['referenceAudio'])
+            identity = ModelIdentity.from_config(model_config)
+            self.identity = {'voice': mode, 'model': identity.to_dict(), 'model_id': identity.id}
         if config['backend'] == 'mlx':
             import mlx.core as mx
             from mlx_audio.tts.utils import load_model
@@ -92,7 +161,7 @@ class Engine:
             self.mx = mx
             self.device = 'metal'
             self.model = load_model(str(model_path))
-            if config['mode'] == 'base':
+            if mode == 'reference':
                 from mlx_audio.utils import load_audio
                 self.reference_audio = load_audio(config['referenceAudio'], sample_rate=RATE)
         else:
@@ -105,11 +174,16 @@ class Engine:
             dtype = (torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16) if self.device.startswith('cuda') else torch.float32
             self.model = Qwen3TTSModel.from_pretrained(str(model_path), device_map=self.device, dtype=dtype,
                                                      attn_implementation='sdpa', local_files_only=True)
-            if config['mode'] == 'base':
+            if mode == 'reference':
                 self.prompt = self.model.create_voice_clone_prompt(ref_audio=config['referenceAudio'],
                     ref_text=config['referenceText'], x_vector_only_mode=False)
 
+    def apply(self, pack):
+        raise Failure('voice')  # implemented with the synthesis backends
+
     def synthesize(self, job, emit):
+        if self.voice is None:
+            raise Failure('no_voice')
         analysis = validate_job(job)
         instruction = self.steering.instruction(analysis) if self.can_instruct else ''
         cfg, started, count, blocks = self.config, time.monotonic(), 0, 0
@@ -159,19 +233,21 @@ def run():
         protocol.flush()
     engine = None
     while True:
-        line = sys.stdin.buffer.readline(32769)
-        if not line:
-            return
-        if len(line) > 32768:
-            return
-        message = json.loads(line)
+        message = {}
         try:
+            message = read_message(sys.stdin.buffer)
+            if message is None:
+                return
             with redirect_stdout(sys.stderr):
                 if message['type'] == 'init' and engine is None:
                     engine = Engine(message['config'])
-                    send({'type': 'ready', 'device': engine.device})
+                    send({'type': 'ready', 'device': engine.device, 'identity': engine.identity})
                 elif message['type'] == 'reset' and engine:
                     engine.steering = Steering()
+                elif message['type'] == 'load_voice' and engine and engine.pack_voice:
+                    pack = engine.pack_voice.load(message['grant'], message['pack'])
+                    engine.apply(pack)
+                    send({'id': message['id'], 'type': 'voice', 'result': {'loaded': True, 'pack_id': pack.pack_id, 'mode': pack.mode}})
                 elif message['type'] == 'speak' and engine:
                     result = engine.synthesize(message['job'], lambda value: send({'id': message['id'], **value}))
                     send({'id': message['id'], 'type': 'done', 'result': result})
@@ -182,7 +258,8 @@ def run():
             print(type(error).__name__, file=sys.stderr)
             if message.get('type') == 'init':
                 send({'type': 'fatal'}); return
-            send({'type': 'error', 'id': message.get('id'), 'error': 'invalid' if str(error) == 'invalid' else 'failed'})
+            code = error.code if isinstance(error, Failure) else 'invalid' if str(error) == 'invalid' else 'failed'
+            send({'type': 'error', 'id': message.get('id'), 'error': code})
 
 
 if __name__ == '__main__':

@@ -1,13 +1,19 @@
 import copy
+from datetime import datetime, timezone
 import hashlib
+import io
 import json
 from pathlib import Path
 import sys
 import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'native'))
-from worker import Steering, validate_job
+from worker import Failure, MAX_LINE, MAX_LOAD_LINE, PackVoice, Steering, read_message, validate_job
+import voicepack as vp
 from vendor.runtime_contract import Analysis
+
+FIX = json.loads((ROOT / 'tests/fixtures/voice_grant_v1.json').read_text())
+NOW = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
 
 
 def analysis():
@@ -51,6 +57,36 @@ class WorkerTests(unittest.TestCase):
         lower = copy.deepcopy(base); lower['summary']['values']['f0_median_st'] = 20
         self.assertNotIn('lower pitch', steering.instruction(Analysis.parse(lower)))
         self.assertEqual(steering.instruction(None), '')
+
+
+class MessageBoundTests(unittest.TestCase):
+    def test_read_message_bounds(self):
+        self.assertEqual(read_message(io.BytesIO(b'{"type":"status"}\n')), {'type': 'status'})
+        self.assertIsNone(read_message(io.BytesIO(b'')))
+        big = b'{"type":"speak","pad":"' + b'x' * MAX_LINE + b'"}\n'
+        self.assertIsNone(read_message(io.BytesIO(big)))
+        load = b'{"type":"load_voice","pack":"' + b'x' * MAX_LINE + b'"}\n'
+        self.assertEqual(read_message(io.BytesIO(load))['type'], 'load_voice')
+        self.assertIsNone(read_message(io.BytesIO(b'{"type":"load_voice","pack":"' + b'x' * MAX_LOAD_LINE + b'"}\n')))
+        with self.assertRaises(Failure): read_message(io.BytesIO(b'not json\n'))
+
+
+class PackVoiceTests(unittest.TestCase):
+    def test_identity_and_load_from_fixture(self):
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+        voice = PackVoice(vp.ModelIdentity.parse(FIX['model']), [vp.unb64url(FIX['signing_public_b64url'], 32)])
+        self.assertEqual(voice.identity_message()['voice'], 'pack'); self.assertEqual(len(voice.identity_message()['public_key']), 43)
+        voice.private = X25519PrivateKey.from_private_bytes(vp.unb64url(FIX['helper_private_b64url'], 32))
+        pack = voice.load(FIX['grant_message'], FIX['ciphertext_b64'], now=NOW)
+        self.assertEqual(pack.pack_id, 'hexxyi-test-icl-1')
+        with self.assertRaises(Failure) as c: voice.load(FIX['grant_message'], FIX['ciphertext_b64'][:-8], now=NOW)
+        self.assertEqual(c.exception.code, 'voice')
+        with self.assertRaises(Failure) as c: voice.load({'v': 'other'}, FIX['ciphertext_b64'], now=NOW)
+        self.assertEqual(c.exception.code, 'invalid')
+        with self.assertRaises(Failure) as c: voice.load(FIX['grant_message'], 'not base64!', now=NOW)
+        self.assertEqual(c.exception.code, 'invalid')
+        fresh = PackVoice(vp.ModelIdentity.parse(FIX['model']), [vp.unb64url(FIX['signing_public_b64url'], 32)])
+        with self.assertRaises(Failure): fresh.load(FIX['grant_message'], FIX['ciphertext_b64'], now=NOW)  # bound to another key
 
 
 if __name__ == '__main__': unittest.main()
