@@ -4,7 +4,7 @@ import {PassThrough} from 'node:stream';
 import {EventEmitter} from 'node:events';
 import {VoiceService} from '../native/service.mjs';
 import {frame, decoder} from '../native/protocol.mjs';
-import {job, request, VERSION, allowedPage} from '../src/voice/contract.js';
+import {job, request, VERSION, allowedPage, VOICE_PACK_MAX_BYTES, VOICE_PART_BYTES, VOICE_PART_CHARS, ERRORS, packParts} from '../src/voice/contract.js';
 import {config} from '../native/config.mjs';
 const phrase = (id = '1') => ({session: 'producer', utterance_id: id, text: 'Thank you.', language: 'en', t_start: 10, t_end: 12, prosody: null});
 const message = (id, type = 'speak', value = phrase(id)) => ({id, v: VERSION, type, ...(type === 'speak' ? {job: value} : {})});
@@ -79,4 +79,21 @@ test('watchdog kills an unresponsive model and clears queued work', async t => {
   s.receive(message('one')); s.receive(message('two'));
   await new Promise(resolve => setTimeout(resolve, 30));
   assert.equal(w[0].killed, 'SIGTERM'); assert.equal(o.filter(m => m.error === 'timeout').length, 2);
+});
+
+test('voice requests validate identity, load declarations and parts', () => {
+  const load = {v: VERSION, id: 'load', type: 'voice_load', grant: {v: 'voice_grant_v1'}, signature: 'A'.repeat(86), size: 20000, sha256: 'a'.repeat(64), parts: 2};
+  assert.equal(request({v: VERSION, id: 'i', type: 'voice_identity'}).type, 'voice_identity');
+  assert.equal(request(load).parts, 2);
+  for (const patch of [{parts: 3}, {size: 0}, {size: VOICE_PACK_MAX_BYTES + 1, parts: 257}, {signature: 'A'.repeat(85)}, {sha256: 'g'.repeat(64)}, {grant: {v: 'other'}}, {grant: {v: 'voice_grant_v1', pad: 'x'.repeat(4096)}}, {extra: 1}]) assert.throws(() => request({...load, ...patch}));
+  const part = {v: VERSION, id: 'p0', type: 'voice_part', load: 'load', index: 0, data: 'AAAA'};
+  assert.equal(request(part).index, 0);
+  for (const patch of [{index: -1}, {index: 256}, {data: ''}, {data: 'AAA'}, {data: 'A'.repeat(VOICE_PART_CHARS + 4)}, {data: 'AA A='}, {load: 'bad id!'}]) assert.throws(() => request({...part, ...patch}));
+  assert.equal(ERRORS.no_voice, 'Load the streamer voice first.');
+});
+test('packParts splits at 16 KiB and encodes without Buffer', () => {
+  const bytes = new Uint8Array(VOICE_PART_BYTES * 2 + 1).fill(7);
+  const parts = packParts(bytes);
+  assert.equal(parts.length, 3); assert.equal(parts[0].length, VOICE_PART_CHARS); assert.equal(parts[2], 'Bw==');
+  assert.deepEqual(Buffer.concat(parts.map(p => Buffer.from(p, 'base64'))), Buffer.from(bytes));
 });

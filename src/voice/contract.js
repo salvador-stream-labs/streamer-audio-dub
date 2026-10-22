@@ -2,6 +2,10 @@ export const HOST = 'app.streamir.qwen';
 export const VERSION = 'local_voice_v1';
 export const MAX_TEXT = 1000;
 export const MAX_AUDIO_SECONDS = 45;
+export const VOICE_PACK_MAX_BYTES = 4194304;
+export const VOICE_PART_BYTES = 16384;
+export const VOICE_PART_CHARS = 21848;
+export const VOICE_PARTS_MAX = 256;
 export const LANGUAGES = {en: 'English', ru: 'Russian', de: 'German', fr: 'French', es: 'Spanish', it: 'Italian', pt: 'Portuguese', ja: 'Japanese', ko: 'Korean', zh: 'Chinese'};
 export const ERRORS = {
   setup: 'Install the local Qwen helper and model, then reconnect.',
@@ -12,6 +16,8 @@ export const ERRORS = {
   timeout: 'Local voice generation took too long.',
   invalid: 'The viewer sent an unsupported voice request.',
   failed: 'Local voice generation failed. Check the helper configuration.',
+  no_voice: 'Load the streamer voice first.',
+  voice: 'The streamer voice could not be loaded.',
 };
 export function fields(value, keys) {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
@@ -44,9 +50,32 @@ export function request(value) {
     fields(value, ['v', 'id', 'type', 'job']);
     return {...value, job: job(value.job)};
   }
-  if (!['status', 'warmup', 'reset'].includes(value.type)) throw new Error('invalid');
+  if (value.type === 'voice_load') {
+    fields(value, ['v', 'id', 'type', 'grant', 'signature', 'size', 'sha256', 'parts']);
+    const g = value.grant;
+    if (!g || typeof g !== 'object' || Array.isArray(g) || g.v !== 'voice_grant_v1' || JSON.stringify(g).length > 4096 ||
+        typeof value.signature !== 'string' || !/^[A-Za-z0-9_-]{86}$/.test(value.signature) ||
+        !Number.isInteger(value.size) || value.size < 1 || value.size > VOICE_PACK_MAX_BYTES ||
+        typeof value.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(value.sha256) ||
+        value.parts !== Math.ceil(value.size / VOICE_PART_BYTES)) throw new Error('invalid');
+    return structuredClone(value);
+  }
+  if (value.type === 'voice_part') {
+    fields(value, ['v', 'id', 'type', 'load', 'index', 'data']);
+    if (typeof value.load !== 'string' || !/^[\w-]{1,64}$/.test(value.load) ||
+        !Number.isInteger(value.index) || value.index < 0 || value.index >= VOICE_PARTS_MAX ||
+        typeof value.data !== 'string' || !value.data || value.data.length > VOICE_PART_CHARS ||
+        !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value.data)) throw new Error('invalid');
+    return {...value};
+  }
+  if (!['status', 'voice_identity', 'warmup', 'reset'].includes(value.type)) throw new Error('invalid');
   fields(value, ['v', 'id', 'type']);
   return {...value};
+}
+export function packParts(bytes) {
+  const parts = [];
+  for (let i = 0; i < bytes.length; i += VOICE_PART_BYTES) parts.push(btoa(String.fromCharCode(...bytes.subarray(i, i + VOICE_PART_BYTES))));
+  return parts;
 }
 export function allowedPage(url) {
   try {
