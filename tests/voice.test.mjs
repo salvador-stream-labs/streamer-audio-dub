@@ -134,13 +134,13 @@ test('voice transfer rejects stray, reordered and oversized parts', t => {
   s.receive({id: 'again', v: VERSION, type: 'voice_load', grant, signature: 'A'.repeat(86), size: 4, sha256: 'a'.repeat(64), parts: 1}); assert.equal(o.at(-1).error, 'busy');
   s.receive({id: 'p1', v: VERSION, type: 'voice_part', load: 'load', index: 1, data: parts[1]}); assert.equal(o.at(-1).error, 'invalid');
   assert.equal(s.transfer, null);
-  transfer(s, bytes, 'ok'); w[0].respond({type: 'voice', id: 'ok', result: {loaded: true, pack_id: 'p', mode: 'icl'}});
+  transfer(s, bytes, 'ok'); assert.deepEqual(o.find(r => r.id === 'ok-1').value, {index: 1}); w[0].respond({type: 'voice', id: 'ok', result: {loaded: true, pack_id: 'p', mode: 'icl'}});
   s.receive({id: 'big', v: VERSION, type: 'voice_load', grant, signature: 'A'.repeat(86), size: 4, sha256: 'b'.repeat(64), parts: 1});
   s.receive({id: 'big-0', v: VERSION, type: 'voice_part', load: 'big', index: 0, data: packParts(new Uint8Array(10))[0]});   // 10 bytes exceed the declared 4
   assert.equal(o.at(-1).error, 'invalid'); assert.equal(s.transfer, null);
   s.receive({id: 'bad', v: VERSION, type: 'voice_load', grant, signature: 'A'.repeat(86), size: 10, sha256: 'b'.repeat(64), parts: 1});
   s.receive({id: 'bad-0', v: VERSION, type: 'voice_part', load: 'bad', index: 0, data: packParts(new Uint8Array(10))[0]});  // digest mismatch
-  assert.equal(o.at(-1).error, 'invalid');
+  assert.equal(o.find(r => r.id === 'bad-0').error, 'invalid'); assert.equal(o.at(-1).error, 'invalid'); assert.equal(o.at(-1).id, 'bad'); assert.equal(s.transfer, null);
   s.receive({id: 'late', v: VERSION, type: 'voice_part', load: 'bad', index: 1, data: 'AAAA'}); assert.equal(o.at(-1).error, 'invalid');
 });
 test('load waits behind generation, and worker voice errors reach the page unchanged', t => {

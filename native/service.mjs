@@ -63,10 +63,13 @@ export class VoiceService {
       this.send({id: m.id, error: 'invalid'}); this.endTransfer('invalid'); return;
     }
     t.parts.push(data); t.bytes += data.length;
+    const pack = last ? Buffer.concat(t.parts) : null;
+    if (last && (pack.length !== t.message.size || createHash('sha256').update(pack).digest('hex') !== t.message.sha256)) {
+      this.send({id: m.id, error: 'invalid'}); this.endTransfer('invalid'); return;
+    }
     this.send({id: m.id, value: {index: m.index}});
     if (!last) return;
-    const pack = Buffer.concat(t.parts); this.transfer = null;
-    if (pack.length !== t.message.size || createHash('sha256').update(pack).digest('hex') !== t.message.sha256) { this.send({id: t.id, error: 'invalid'}); return; }
+    this.transfer = null;
     if (this.queue.length >= 3) { this.send({id: t.id, error: 'queue_full'}); return; }
     const {grant, signature} = t.message;
     this.queue.push({message: {id: t.id, type: 'voice_load', grant, signature, pack: pack.toString('base64')}, at: t.at});
