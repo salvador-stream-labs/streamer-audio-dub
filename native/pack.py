@@ -13,6 +13,15 @@ import voicepack as vp
 PLACEHOLDER_KEY = 'A' * 43
 
 
+def write_outputs(out, summary, ciphertext, key):
+    out.mkdir(parents=True, exist_ok=True)
+    for name, data, mode in ((summary['file'], ciphertext, 0o644), (summary['key_file'], key.hex().encode(), 0o600),
+                             (f"{summary['pack_id']}.json", json.dumps(summary).encode(), 0o644)):
+        fd = os.open(out / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write(data)
+
+
 def build(args):
     config = json.load(sys.stdin)
     config = {k: v for k, v in config.items() if k not in ('referenceAudio', 'referenceText')}
@@ -33,15 +42,9 @@ def build(args):
                               built=now.strftime('%Y-%m-%dT%H:%M:%SZ'))
     key = os.urandom(32)
     ciphertext = vp.encrypt_pack(plaintext, key)
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
     summary = {'pack_id': pack_id, 'channel': args.channel, 'model': model.id, 'sha256': hashlib.sha256(ciphertext).hexdigest(),
                'size': len(ciphertext), 'file': f'{pack_id}.enc', 'key_file': f'{pack_id}.key'}
-    for name, data, mode in ((summary['file'], ciphertext, 0o644), (summary['key_file'], key.hex().encode(), 0o600),
-                             (f'{pack_id}.json', json.dumps(summary).encode(), 0o644)):
-        fd = os.open(out / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
-        with os.fdopen(fd, 'wb') as handle:
-            handle.write(data)
+    write_outputs(Path(args.out), summary, ciphertext, key)
     print(json.dumps(summary))
 
 

@@ -22,9 +22,26 @@ class PackCliTests(unittest.TestCase):
             pack = vp.open_pack(message, pinned_keys=[vp.unb64url(keys['signing_public_b64url'], 32)], helper_private=helper,
                                 model=vp.ModelIdentity.parse(FIX['model']), ciphertext=enc.read_bytes(), now=__import__('datetime').datetime.now(__import__('datetime').timezone.utc))
             self.assertEqual(pack.pack_id, 'hexxyi-test-icl-1')
-            with self.assertRaises(subprocess.CalledProcessError):
-                run('grant', '--signing-seed', keys['signing_seed_b64url'], '--pack', str(enc), '--key', str(key), '--helper-public-key', FIX['helper_public_b64url'],
-                    '--channel', 'hexxyi', '--model-id', 'qwen3_tts-base-other-12hz', '--pack-url', 'https://x/p')
+            done = subprocess.run([sys.executable, '-I', str(ROOT / 'native/pack.py'), 'grant', '--signing-seed', keys['signing_seed_b64url'], '--pack', str(enc),
+                                   '--key', str(key), '--helper-public-key', FIX['helper_public_b64url'], '--channel', 'hexxyi',
+                                   '--model-id', 'qwen3_tts-base-other-12hz', '--pack-url', 'https://x/p'], capture_output=True, text=True, check=False)
+            self.assertEqual(done.returncode, 1); self.assertIn('does not match', done.stderr)
+            secret = key.read_text()
+            self.assertNotIn(secret, done.stderr + done.stdout)
+
+    def test_write_outputs(self):
+        import pack
+        summary = {'pack_id': 'a-1', 'channel': 'c', 'model': 'm', 'sha256': '0' * 64, 'size': 3, 'file': 'a-1.enc', 'key_file': 'a-1.key'}
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d, 'o')
+            pack.write_outputs(out, summary, b'abc', b'\x01' * 32)
+            self.assertEqual(sorted(p.name for p in out.iterdir()), ['a-1.enc', 'a-1.json', 'a-1.key'])
+            self.assertEqual(os.stat(out / 'a-1.key').st_mode & 0o777, 0o600)
+            self.assertEqual((out / 'a-1.key').read_text(), '01' * 32)
+            self.assertEqual(json.loads((out / 'a-1.json').read_text()), summary)
+            with self.assertRaises(FileExistsError):
+                pack.write_outputs(out, summary, b'xyz', b'\x02' * 32)
+            self.assertEqual((out / 'a-1.enc').read_bytes(), b'abc')
 
     def test_fixtures(self):
         with tempfile.TemporaryDirectory() as d:
