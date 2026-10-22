@@ -30,3 +30,39 @@ class ModelIdentityTests(unittest.TestCase):
         for patch in [{'extra': 1}, {'enc_dim': '2048'}, {'tts_model_type': 'voice_design'}, {'tts_model_size': 'A/B'}, {'num_code_groups': 0}]:
             with self.assertRaises(vp.PackError): vp.ModelIdentity.parse({**value, **patch})
         with self.assertRaises(vp.PackError): vp.ModelIdentity.parse({k: v for k, v in value.items() if k != 'tokenizer'})
+
+MODEL = vp.ModelIdentity.from_config({**CONFIG_1B7, 'tts_model_size': 'test',
+         'speaker_encoder_config': {'enc_dim': 8}, 'talker_config': {'num_code_groups': 2}})
+def embedding(n=8): return (b'\x00\x00\x80\x3f' * n)          # float32 1.0 repeated
+def codes(frames=3, groups=2): return (b'\x05\x00\x00\x00' * (frames * groups))
+def build(**patch):
+    args = dict(pack_id='hexxyi-test-icl-1', channel='hexxyi', label='hexxyi', consent_ref='studio:consent:1', model=MODEL,
+                mode='icl', reference_language='ru', ref_text='Привет', spk_embedding=embedding(), ref_codes=codes(),
+                builder={'backend': 'mlx', 'package': 'mlx-audio 0.5.9', 'model_sha256': '0' * 64}, built='2026-10-22T12:00:00Z')
+    return vp.build_pack(**{**args, **patch})
+
+class PackFormatTests(unittest.TestCase):
+    def test_round_trip_icl_and_embedding(self):
+        pack = vp.parse_pack(build(), MODEL)
+        self.assertEqual((pack.pack_id, pack.mode, pack.ref_text, pack.frames), ('hexxyi-test-icl-1', 'icl', 'Привет', 3))
+        self.assertEqual(pack.ref_codes, codes()); self.assertEqual(pack.spk_embedding, embedding())
+        only = vp.parse_pack(build(mode='embedding', ref_text=None, ref_codes=None), MODEL)
+        self.assertEqual((only.mode, only.ref_text, only.ref_codes, only.frames), ('embedding', None, None, 0))
+    def test_header_layout_is_length_prefixed_json(self):
+        plaintext = build(); n = int.from_bytes(plaintext[:4], 'little')
+        header = json.loads(plaintext[4:4 + n]); self.assertEqual(header['v'], 'voice_pack_v1')
+        self.assertEqual(header['tensors']['spk_embedding'], {'dtype': 'float32', 'shape': [8], 'offset': 0, 'length': 32})
+        self.assertEqual(header['tensors']['ref_codes']['shape'], [3, 2])
+    def test_pack_rejects_model_mismatch(self):
+        other = vp.ModelIdentity.parse({**MODEL.to_dict(), 'num_code_groups': 4})
+        with self.assertRaises(vp.PackError): vp.parse_pack(build(), other)
+        with self.assertRaises(vp.PackError): vp.parse_pack(build(spk_embedding=embedding(9)), MODEL)
+    def test_pack_bounds_and_strictness(self):
+        for patch in [dict(ref_text='x' * 1001), dict(ref_codes=codes(161)), dict(pack_id='Bad Id'), dict(mode='icl', ref_text=None),
+                      dict(mode='embedding', ref_codes=codes()), dict(ref_codes=codes()[:-1])]:
+            with self.assertRaises(vp.PackError): vp.parse_pack(build(**patch), MODEL)
+        plaintext = bytearray(build()); n = int.from_bytes(plaintext[:4], 'little')
+        header = json.loads(plaintext[4:4 + n]); header['extra'] = 1; raw = json.dumps(header).encode()
+        tampered = len(raw).to_bytes(4, 'little') + raw + bytes(plaintext[4 + n:])
+        with self.assertRaises(vp.PackError): vp.parse_pack(tampered, MODEL)
+        with self.assertRaises(vp.PackError): vp.parse_pack(b'\xff\xff\xff\x7f' + bytes(8), MODEL)
