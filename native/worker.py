@@ -189,8 +189,51 @@ class Engine:
                 self.prompt = self.model.create_voice_clone_prompt(ref_audio=config['referenceAudio'],
                     ref_text=config['referenceText'], x_vector_only_mode=False)
 
+    def conditioning(self, reference, ref_text, mode):
+        """Pack tensors for a reference: (float32 LE embedding, int32 LE [T, groups] codes or None, frames)."""
+        check_reference(reference)
+        if mode not in ('icl', 'embedding') or (mode == 'icl' and not ref_text):
+            raise ValueError('invalid')
+        np = self.np
+        if self.config['backend'] == 'mlx':
+            from mlx_audio.utils import load_audio
+            audio, model = load_audio(reference, sample_rate=RATE), self.model
+            # Class methods: an applied pack overrides these on the instance.
+            embedding = np.array(type(model).extract_speaker_embedding(model, audio)[0].astype(self.mx.float32))
+            tokenizer = model.speech_tokenizer
+            codes = np.array(type(tokenizer).encode(tokenizer, audio[None, None, :])[0].T) if mode == 'icl' else None
+        else:
+            item = self.model.create_voice_clone_prompt(ref_audio=reference, ref_text=ref_text,
+                                                        x_vector_only_mode=(mode == 'embedding'))[0]
+            embedding = item.ref_spk_embedding.float().cpu().numpy()
+            codes = item.ref_code.cpu().numpy() if item.ref_code is not None else None
+        if codes is None:
+            return embedding.astype('<f4').tobytes(), None, 0
+        return embedding.astype('<f4').tobytes(), codes.astype('<i4').tobytes(), codes.shape[0]
+
     def apply(self, pack):
-        raise Failure('voice')  # implemented with the synthesis backends
+        """Condition the model on a parsed pack; its tensors stay in memory only."""
+        np = self.np
+        embedding = np.frombuffer(pack.spk_embedding, '<f4').copy()
+        codes = None if pack.ref_codes is None else np.frombuffer(pack.ref_codes, '<i4').reshape(pack.frames, -1).copy()
+        if self.config['backend'] == 'mlx':
+            mx, model = self.mx, self.model
+            self.mlx_voice = {'embedding': mx.array(embedding)[None, :],
+                              'codes': None if codes is None else mx.array(codes.T)[None, :, :], 'ref_text': pack.ref_text}
+            # Instance overrides make mlx-audio's reference path read the pack instead of audio.
+            model.extract_speaker_embedding = lambda audio, sr=RATE: self.mlx_voice['embedding']
+            model.speech_tokenizer.encode = lambda audio: self.mlx_voice['codes']
+            model._icl_cache.clear()
+            self.dummy_reference = mx.zeros((RATE,), dtype=mx.float32)
+        else:
+            import torch
+            from qwen_tts.inference.qwen3_tts_model import VoiceClonePromptItem
+            device = self.model.device
+            self.prompt = [VoiceClonePromptItem(
+                ref_code=None if codes is None else torch.tensor(codes, dtype=torch.long, device=device),
+                ref_spk_embedding=torch.tensor(embedding, dtype=self.model.model.dtype, device=device),
+                x_vector_only_mode=pack.mode == 'embedding', icl_mode=pack.mode == 'icl', ref_text=pack.ref_text)]
+        self.voice = pack
 
     def synthesize(self, job, emit):
         if self.voice is None:
@@ -216,6 +259,8 @@ class Engine:
                         temperature=.7, stream=True, streaming_interval=.5, verbose=False)
             if cfg['mode'] == 'custom_voice':
                 args.update(voice=cfg['speaker'], instruct=instruction or None)
+            elif self.pack_voice:
+                args.update(ref_audio=self.dummy_reference, ref_text=self.voice.ref_text)
             else:
                 args.update(ref_audio=self.reference_audio, ref_text=cfg['referenceText'])
             for result in self.model.generate(**args):
