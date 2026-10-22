@@ -56,6 +56,18 @@ def check_reference(path):
             raise ValueError('Reference must be 3–12 seconds of mono PCM16 WAV')
 
 
+def lenient_identity(voice, config):
+    """Identity for non-pack modes; CustomVoice configs lack fields the strict parser needs, so never raise."""
+    def text(value):
+        return value if isinstance(value, str) and value else 'unknown'
+    tokenizer = text(config.get('tokenizer_type'))
+    model = {'family': 'qwen3_tts', 'tts_model_type': text(config.get('tts_model_type')),
+             'tts_model_size': text(config.get('tts_model_size')),
+             'tokenizer': '12hz' if tokenizer.endswith('_12hz') else tokenizer}
+    return {'voice': voice, 'model': model,
+            'model_id': f"qwen3_tts-{model['tts_model_type']}-{model['tts_model_size']}-{model['tokenizer']}"}
+
+
 class PackVoice:
     def __init__(self, identity, pinned_keys):
         self.identity, self.pinned_keys = identity, pinned_keys
@@ -151,8 +163,7 @@ class Engine:
         else:
             if mode == 'reference':
                 check_reference(config['referenceAudio'])
-            identity = ModelIdentity.from_config(model_config)
-            self.identity = {'voice': mode, 'model': identity.to_dict(), 'model_id': identity.id}
+            self.identity = lenient_identity(mode, model_config)
         if config['backend'] == 'mlx':
             import mlx.core as mx
             from mlx_audio.tts.utils import load_model

@@ -8,7 +8,7 @@ import sys
 import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'native'))
-from worker import Failure, MAX_LINE, MAX_LOAD_LINE, PackVoice, Steering, read_message, validate_job
+from worker import Failure, MAX_LINE, MAX_LOAD_LINE, PackVoice, Steering, lenient_identity, read_message, validate_job
 import voicepack as vp
 from vendor.runtime_contract import Analysis
 
@@ -87,6 +87,16 @@ class PackVoiceTests(unittest.TestCase):
         self.assertEqual(c.exception.code, 'invalid')
         fresh = PackVoice(vp.ModelIdentity.parse(FIX['model']), [vp.unb64url(FIX['signing_public_b64url'], 32)])
         with self.assertRaises(Failure): fresh.load(FIX['grant_message'], FIX['ciphertext_b64'], now=NOW)  # bound to another key
+
+
+class IdentityTests(unittest.TestCase):
+    def test_custom_voice_config_without_speaker_encoder(self):
+        config = {'tts_model_type': 'custom_voice', 'tts_model_size': '1b7',
+                  'tokenizer_type': 'qwen3_tts_tokenizer_12hz', 'talker_config': {'num_code_groups': 16}}
+        identity = lenient_identity('preset', config)
+        self.assertEqual(identity['voice'], 'preset'); self.assertNotIn('public_key', identity)
+        self.assertEqual(identity['model_id'], 'qwen3_tts-custom_voice-1b7-12hz')
+        self.assertEqual(lenient_identity('reference', {})['model_id'], 'qwen3_tts-unknown-unknown-unknown')
 
 
 if __name__ == '__main__': unittest.main()
