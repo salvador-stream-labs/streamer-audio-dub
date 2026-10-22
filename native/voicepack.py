@@ -129,8 +129,12 @@ class Pack:
         return self.header['tensors']['ref_codes']['shape'][0] if self.ref_codes is not None else 0
 
 
+def _units(value: str) -> int:
+    return len(value.encode('utf-16-le', 'surrogatepass')) // 2
+
+
 def _text(value, high: int, what: str, low: int = 1) -> str:
-    if not isinstance(value, str) or not low <= len(value) <= high:
+    if not isinstance(value, str) or not low <= _units(value) <= high:
         raise PackError(f'invalid {what}')
     return value
 
@@ -157,11 +161,23 @@ def build_pack(*, pack_id: str, channel: str, label: str, consent_ref: str, mode
     return result
 
 
+def _no_duplicates(pairs: list) -> dict:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise PackError('duplicate header key')
+    return result
+
+
+def _no_constant(name: str):
+    raise PackError('invalid header constant')
+
+
 def _tensor(spec, dtype: str, shape: list, offset: int, body: bytes) -> bytes:
     length = 4
     for dim in shape:
         length *= dim
-    if (not isinstance(spec, dict) or set(spec) != {'dtype', 'shape', 'offset', 'length'} or spec['dtype'] != dtype
+    if (not isinstance(spec, dict) or not all(_int_in(spec.get(k), 0, MAX_PLAINTEXT) for k in ('offset', 'length'))
+            or not isinstance(spec['shape'], list) or not all(_int_in(d, 1, MAX_PLAINTEXT) for d in spec['shape']) or set(spec) != {'dtype', 'shape', 'offset', 'length'} or spec['dtype'] != dtype
             or spec['shape'] != shape or spec['offset'] != offset or spec['length'] != length
             or offset + length > len(body)):
         raise PackError('invalid tensor layout')
@@ -175,8 +191,9 @@ def parse_pack(plaintext: bytes, model: ModelIdentity) -> Pack:
     if size > MAX_PLAINTEXT or 4 + size > len(plaintext):
         raise PackError('invalid header length')
     try:
-        header = json.loads(bytes(plaintext[4:4 + size]).decode('utf-8'))
-    except ValueError as error:
+        header = json.loads(bytes(plaintext[4:4 + size]).decode('utf-8'), object_pairs_hook=_no_duplicates,
+                            parse_constant=_no_constant)
+    except (ValueError, RecursionError) as error:
         raise PackError('invalid header') from error
     body = bytes(plaintext[4 + size:])
     keys = {'v', 'pack_id', 'channel', 'voice', 'model', 'mode', 'reference_language', 'tensors', 'built', 'builder'}

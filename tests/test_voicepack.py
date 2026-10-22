@@ -66,3 +66,24 @@ class PackFormatTests(unittest.TestCase):
         tampered = len(raw).to_bytes(4, 'little') + raw + bytes(plaintext[4 + n:])
         with self.assertRaises(vp.PackError): vp.parse_pack(tampered, MODEL)
         with self.assertRaises(vp.PackError): vp.parse_pack(b'\xff\xff\xff\x7f' + bytes(8), MODEL)
+
+def retail(plaintext, edit=None, raw=None):
+    n = int.from_bytes(plaintext[:4], 'little')
+    if raw is None:
+        header = json.loads(plaintext[4:4 + n]); edit(header); raw = json.dumps(header).encode()
+    return len(raw).to_bytes(4, 'little') + raw + plaintext[4 + n:]
+
+class PackHostileHeaderTests(unittest.TestCase):
+    def test_ref_text_counts_utf16_units(self):
+        vp.parse_pack(build(ref_text='😀' * 500), MODEL)
+        with self.assertRaises(vp.PackError): build(ref_text='😀' * 501)
+    def test_tensor_numbers_must_be_strict_ints(self):
+        def edit(h): h['tensors']['spk_embedding'].update(offset=False, length=32.0)
+        with self.assertRaises(vp.PackError): vp.parse_pack(retail(build(), edit), MODEL)
+        def shape(h): h['tensors']['spk_embedding']['shape'] = [8.0]
+        with self.assertRaises(vp.PackError): vp.parse_pack(retail(build(), shape), MODEL)
+    def test_deep_nesting_duplicates_and_constants(self):
+        with self.assertRaises(vp.PackError): vp.parse_pack(retail(build(), raw=b'[' * 100000), MODEL)
+        good = json.dumps(json.loads(build()[4:4 + int.from_bytes(build()[:4], 'little')])).encode()
+        with self.assertRaises(vp.PackError): vp.parse_pack(retail(build(), raw=good[:-1] + b',"v":"voice_pack_v1"}'), MODEL)
+        with self.assertRaises(vp.PackError): vp.parse_pack(retail(build(), raw=good[:-1] + b',"x":NaN}'), MODEL)
