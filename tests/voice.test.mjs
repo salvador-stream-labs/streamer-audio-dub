@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import {PassThrough} from 'node:stream';
 import {EventEmitter} from 'node:events';
 import {VoiceService} from '../native/service.mjs';
@@ -103,4 +104,49 @@ test('packParts splits at 16 KiB and encodes without Buffer', () => {
   const parts = packParts(bytes);
   assert.equal(parts.length, 3); assert.equal(parts[0].length, VOICE_PART_CHARS); assert.equal(parts[2], 'Bw==');
   assert.deepEqual(Buffer.concat(parts.map(p => Buffer.from(p, 'base64'))), Buffer.from(bytes));
+});
+const grant = {v: 'voice_grant_v1', channel: 'hexxyi'};
+function transfer(s, bytes, id = 'load') {
+  const parts = packParts(bytes);
+  s.receive({id, v: VERSION, type: 'voice_load', grant, signature: 'A'.repeat(86), size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), parts: parts.length});
+  parts.forEach((data, index) => s.receive({id: `${id}-${index}`, v: VERSION, type: 'voice_part', load: id, index, data}));
+}
+test('identity and voice state come from the worker and clear on restart', async t => {
+  const {service: s, workers: w, output: o} = fixture(); t.after(() => s.close());
+  s.receive(message('who', 'voice_identity'));
+  w[0].respond({type: 'ready', device: 'metal', identity: {voice: 'pack', model: {enc_dim: 8}, model_id: 'qwen3_tts-base-test-12hz', public_key: 'B'.repeat(43)}});
+  assert.equal(o.at(-1).value.public_key, 'B'.repeat(43));
+  s.receive(message('st', 'status')); assert.deepEqual(o.at(-1).value.voice, {state: 'none'});
+  transfer(s, new Uint8Array(10));
+  assert.equal(w[0].commands.at(-1).type, 'load_voice'); assert.equal(JSON.stringify(w[0].commands.at(-1)).startsWith('{"type":"load_voice"'), true);
+  w[0].respond({type: 'voice', id: 'load', result: {loaded: true, pack_id: 'p', mode: 'icl'}});
+  assert.deepEqual(o.at(-1).value, {loaded: true, pack_id: 'p', mode: 'icl'});
+  s.receive(message('st2', 'status')); assert.deepEqual(o.at(-1).value.voice, {state: 'loaded', pack_id: 'p'});
+  s.receive(message('one')); s.receive(message('reset', 'reset')); await Promise.resolve();
+  s.receive(message('st3', 'status')); assert.deepEqual(o.at(-1).value.voice, {state: 'none'});
+});
+test('voice transfer rejects stray, reordered and oversized parts', t => {
+  const {service: s, workers: w, output: o} = fixture(); t.after(() => s.close());
+  s.receive(message('warm', 'warmup')); w[0].respond({type: 'ready', device: 'metal'});
+  s.receive({id: 'stray', v: VERSION, type: 'voice_part', load: 'nope', index: 0, data: 'AAAA'}); assert.equal(o.at(-1).error, 'invalid');
+  const bytes = new Uint8Array(VOICE_PART_BYTES + 5).fill(1), parts = packParts(bytes);
+  s.receive({id: 'load', v: VERSION, type: 'voice_load', grant, signature: 'A'.repeat(86), size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), parts: 2});
+  s.receive({id: 'again', v: VERSION, type: 'voice_load', grant, signature: 'A'.repeat(86), size: 4, sha256: 'a'.repeat(64), parts: 1}); assert.equal(o.at(-1).error, 'busy');
+  s.receive({id: 'p1', v: VERSION, type: 'voice_part', load: 'load', index: 1, data: parts[1]}); assert.equal(o.at(-1).error, 'invalid');
+  assert.equal(s.transfer, null);
+  transfer(s, bytes, 'ok'); w[0].respond({type: 'voice', id: 'ok', result: {loaded: true, pack_id: 'p', mode: 'icl'}});
+  s.receive({id: 'big', v: VERSION, type: 'voice_load', grant, signature: 'A'.repeat(86), size: 4, sha256: 'b'.repeat(64), parts: 1});
+  s.receive({id: 'big-0', v: VERSION, type: 'voice_part', load: 'big', index: 0, data: packParts(new Uint8Array(10))[0]});   // 10 bytes exceed the declared 4
+  assert.equal(o.at(-1).error, 'invalid'); assert.equal(s.transfer, null);
+  s.receive({id: 'bad', v: VERSION, type: 'voice_load', grant, signature: 'A'.repeat(86), size: 10, sha256: 'b'.repeat(64), parts: 1});
+  s.receive({id: 'bad-0', v: VERSION, type: 'voice_part', load: 'bad', index: 0, data: packParts(new Uint8Array(10))[0]});  // digest mismatch
+  assert.equal(o.at(-1).error, 'invalid');
+  s.receive({id: 'late', v: VERSION, type: 'voice_part', load: 'bad', index: 1, data: 'AAAA'}); assert.equal(o.at(-1).error, 'invalid');
+});
+test('load waits behind generation, and worker voice errors reach the page unchanged', t => {
+  const {service: s, workers: w, output: o} = fixture(); t.after(() => s.close());
+  s.receive(message('one')); w[0].respond({type: 'ready', device: 'metal'});
+  s.receive({id: 'load', v: VERSION, type: 'voice_load', grant, signature: 'A'.repeat(86), size: 4, sha256: 'a'.repeat(64), parts: 1}); assert.equal(o.at(-1).error, 'busy');
+  w[0].respond({type: 'error', id: 'one', error: 'no_voice'}); assert.equal(o.at(-1).error, 'no_voice');
+  transfer(s, new Uint8Array(4)); w[0].respond({type: 'error', id: 'load', error: 'voice'}); assert.equal(o.at(-1).error, 'voice');
 });
